@@ -4,7 +4,9 @@
 
 ## 1. 証跡と合否を分ける
 
-各試験について、実施者が「合格 / 不合格 / 未実施」を記録します。画面例の架空の成功値は用意していません。エラー、待機時間、取得上限も記録し、検索失敗を「該当なし」と扱いません。
+各試験について、実施者が実際の観測結果と「合格 / 不合格 / 未実施」を記録してください。エラー、待機時間、取得上限も記録します。検索に失敗した場合はエラー内容、検索が成功して0件だった場合は検索期間と0件という結果をそれぞれ記載してください。
+
+①の講師用ラボでは、hub の Bastion から workload、Windows DNS、L1 の各デスクトップに接続でき、L1 経由で L2 を操作できることを確認してから進めてください。否定試験中も、この管理接続を維持します。
 
 ```text
 試験番号:
@@ -17,11 +19,11 @@
 切り戻し・残件:
 ```
 
-作業記録や画面キャプチャにはデバイスコード、認証情報、実ログ本文を不用意に含めないでください。このハンズオンでは、自分で生成した合成イベントを使用します。
+このハンズオンでは、自分で生成した合成イベントを確認し、Marker と生成時刻を作業記録に残してください。デバイスコードや認証情報を画面キャプチャに含めると第三者に認証を利用されるリスクがあり、業務の実ログ本文を含めると機密情報の漏えいにつながるため、これらを共有資料に記録しないでください。
 
 ## 2. 名前解決と TCP を確認する
 
-Azure VM とオンプレミス Windows Server の両方で、PE の「DNS の構成」にある実 FQDN を確認します。オンプレミスでは既存 Windows DNS に問い合わせ、Resolver へ直接向けて検証を代替しません。
+Azure VM とオンプレミス Windows Server の両方で、PE の「DNS の構成」にある実 FQDN を確認してください。オンプレミスでは既存 Windows DNS に問い合わせ、条件付きフォワーダーを通る経路を検証します。
 
 | 番号 | 操作 | 合格条件 |
 |---|---|---|
@@ -32,7 +34,7 @@ Azure VM とオンプレミス Windows Server の両方で、PE の「DNS の構
 | TCP-1 | 上記の各 IP / FQDN の TCP 443 を検証 | 到達できる |
 | TCP-2 | オンプレミスから AzFW Private IP の TCP 3128 を検証 | 到達できる |
 
-`Test-NetConnection` は Agent の Proxy を使用しない直接 TCP の確認です。TCP 成功だけでは TLS 認証や Private Link の利用を証明できません。
+`Test-NetConnection` は直接 TCP 接続の確認に使用します。TLS 認証と Private Link の利用は、後述の Agent の診断結果、接続先 IP、ログ到着と組み合わせて確認してください。
 
 ```powershell
 Resolve-DnsName '<実際の FQDN>' -Server '<対象サーバーが使う DNS IP>'
@@ -58,7 +60,7 @@ Heartbeat
 | take 100
 ```
 
-対象 Azure VM の ID は `Microsoft.Compute/virtualMachines`、Arc の ID は `Microsoft.HybridCompute/machines` です。Computer の名前だけで同一対象と判断しません。Heartbeat は稼働確認であり、イベントの収集定義が正しいことまでは証明しません。
+対象 Azure VM の ID は `Microsoft.Compute/virtualMachines`、Arc の ID は `Microsoft.HybridCompute/machines` です。Computer と `_ResourceId` の両方を照合してください。Heartbeat で AMA の稼働を確認し、次の Event クエリでイベントの収集結果を確認します。
 
 [合成イベントのクエリ](../queries/test-events.kql):
 
@@ -72,7 +74,7 @@ Event
 | take 100
 ```
 
-`Write-HandsonEvent.ps1` が返した Marker と生成 UTC 時刻を照合します。イベント本文は `AmplsArcHandson marker=<GUID>; utc=<UTC>` です。必要なら `where RenderedDescription contains "<今回の Marker>"` を追加します。Event は SecurityEvent テーブルではありません。
+`Write-HandsonEvent.ps1` が返した Marker と生成 UTC 時刻を照合します。イベント本文は `AmplsArcHandson marker=<GUID>; utc=<UTC>` です。必要なら `where RenderedDescription contains "<今回の Marker>"` を追加します。今回の DCR で収集する Application イベントは `Event` テーブルを検索してください。
 
 | 番号 | 合格条件 |
 |---|---|
@@ -81,7 +83,7 @@ Event
 | LOG-3 | LAW の公開取り込み Disabled、AMPLS の取り込み PrivateOnly のまま LOG-1 / LOG-2 が成功 |
 | LOG-4 | DCE の設定取得先と LAW の実接続先がそれぞれ PE の IP である |
 
-到着だけで閉域と判定しません。DNS、接続先、設定値を併せて判定します。
+ログの到着、DNS 応答、接続先 IP、公開取り込みの設定値を併せて閉域収集を判定してください。
 
 ## 4. Arc の Private Link と Proxy を確認する
 
@@ -113,11 +115,11 @@ AZFWApplicationRule
 | take 100
 ```
 
-Legacy の AzureDiagnostics に出力している場合は、診断設定に合わせてクエリを変更します。別の LAW に送った診断ログを今回の LAW で探さないでください。TLS トンネル内の要求すべてをログが表示するとは限らないため、Agent の診断結果も組み合わせます。
+Legacy の AzureDiagnostics に出力している場合は、診断設定に合わせてクエリを変更します。Firewall の診断設定で指定した LAW を開いて検索してください。TLS トンネル内の通信は Agent の診断結果も組み合わせて確認します。
 
 ## 5. 公開通信が Proxy のみで成立するかを試す
 
-専用の対象サーバーだけで実施します。共有 Firewall の停止、共有ルールの削除、既存サーバーの一括変更はしません。失敗時は試験を止め、変更した値を戻して管理担当に連絡します。
+専用の対象サーバーだけで実施します。共有 Firewall の停止、共有ルールの削除、既存サーバーの一括変更は、業務通信を停止させるリスクがあるため、実施しないでください。失敗時は試験を止め、変更した値を戻して管理担当に連絡します。
 
 1. ③の制限により、対象から公開宛先への直接 TCP 443 が失敗することを確認します。PE と Proxy は到達できる状態を維持します。
 2. `azcmagent check` と Firewall ログで、Proxy 経由の公開通信が成功することを確認します。
@@ -129,9 +131,9 @@ Legacy の AzureDiagnostics に出力している場合は、診断設定に合�
    & $arc check --location japaneast --enable-pls-check
    ```
 
-5. 公開宛先のチェックが失敗することを確認します。Arc PLS の DNS / Private IP の疎通と混同しません。`azcmagent check` の全体が成功した場合は、Proxy 環境変数や直接の出口が残っていないか調べます。
-6. 同じ時間帯に `Write-HandsonEvent.ps1` を再実行し、**その新しい Marker** が AMA から届くか確認します。既送信ログの遅延到着を使いません。短時間の試験であり、Arc の認証を無期限に切った状態で AMA が稼働する保証にはなりません。
-7. 直ちに Proxy URL と bypass を元の値へ戻し、`azcmagent check` の成功を確認します。確認後も Arc を切断した状態のまま放置しません。
+5. 公開宛先のチェックが失敗することを確認し、Arc PLS の DNS / Private IP の疎通と個別に記録してください。`azcmagent check` の全体が成功した場合は、Proxy 環境変数や直接の出口が残っていないか調べます。
+6. 同じ時間帯に `Write-HandsonEvent.ps1` を再実行し、**その新しい Marker** が AMA から届くか確認してください。生成 UTC 時刻と到着時刻も照合し、今回の試験中に生成したイベントで判定します。この試験は短時間の経路確認です。Arc による認証更新を継続するため、確認後は次の手順で Proxy を復元してください。
+7. 直ちに Proxy URL と bypass を元の値へ戻し、`azcmagent check` の成功と Portal の Connected 状態を確認してください。
 
    ```powershell
    & $arc config set proxy.url 'http://<FW IP>:3128'
@@ -139,9 +141,9 @@ Legacy の AzureDiagnostics に出力している場合は、診断設定に合�
    & $arc check --location japaneast --enable-pls-check
    ```
 
-8. 新しい公開要求が Firewall に記録されることを確認します。ARM の登録 / 解除だけを試験のために繰り返さず、ネットワークチェックと認証要求の結果で確認します。キャッシュ済み認証だけを使った画面表示では判定しません。
+8. 新しい公開要求が Firewall に記録されることを確認してください。ネットワークチェックと新しい認証要求の結果を、試験時刻と照合して判定します。試験のためだけの Arc 登録・解除の繰り返しは、ID や関連付けの再作成を招くリスクがあるため、実施しないでください。
 
-**合格条件**: 直接の公開通信は失敗し、Proxy 指定ありの公開チェックは成功、指定を外すと失敗、復元後は成功します。同時に AMA の新規 Event は PE 経由で到着します。どの段階でも失敗した場合、成功へ書き換えず観測値を記録します。
+**合格条件**: 直接の公開通信は失敗し、Proxy 指定ありの公開チェックは成功、指定を外すと失敗、復元後は成功します。同時に AMA の新規 Event は PE 経由で到着します。各段階の成否と観測値を記録してください。
 
 ## 6. 導入・更新の確認を別に残す
 
@@ -153,4 +155,4 @@ Legacy の AzureDiagnostics に出力している場合は、診断設定に合�
 | 稼働中 | DCE の設定取得、LAW の新規 Event / Heartbeat、接続先 IP |
 | Arc / AMA 更新 | 更新前後のバージョン、配布経路、更新後の新規ログ |
 
-更新試験には別途変更承認と復旧計画が必要です。未実施なら未実施と記録し、「導入・更新も Agent Proxy のみで完了」と結論づけません。
+更新試験には別途変更承認と復旧計画が必要です。各工程を「合格 / 不合格 / 未実施」で記録し、試験した工程とバージョンを明示して、導入・稼働・更新それぞれの結果をまとめてください。

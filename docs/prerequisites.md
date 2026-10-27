@@ -4,13 +4,13 @@
 
 ## 1. 実施対象を決める
 
-最初は業務負荷のない Windows VM とオンプレミス Windows Server を各1台選びます。既存環境を使う場合、VNet や Firewall を作り直しません。検証用のリソースグループを用意しても、共有 DNS の変更はほかの環境に影響します。
+最初は業務負荷のない Windows VM とオンプレミス Windows Server を各1台選びます。既存環境を使う場合は、その VNet と Firewall を使用します。検証用のリソースグループを用意しても、共有 DNS の変更はほかの環境に影響します。
 
 Portal 右上のディレクトリと、各作成画面のサブスクリプションを照合してください。複数テナント、複数リージョン、Lighthouse、Azure Arc Gateway、Microsoft Sentinel、VM Insights、性能カウンターはこのハンズオンの対象外です。既存の導入がある場合は、既存設定との併存を担当者が確認してから実施します。
 
 ## 2. 値を記録する
 
-実際の値はアクセスを制限した作業記録に書き、Git に保存しません。名前は例であり、リソース ID や IP をそのまま転記しないでください。
+実際の値はアクセスを制限した作業記録に記載してください。表の名前と IP は例です。実施環境の値に置き換え、Portal の表示と照合してください。
 
 | 項目 | 例 / 選び方 |
 |---|---|
@@ -21,7 +21,7 @@ Portal 右上のディレクトリと、各作成画面のサブスクリプシ�
 | AMPLS / AMPLS PE | `ampls-handson` / `pe-ampls-handson` |
 | Arc PLS / Arc PE | `arcpls-handson` / `pe-arc-handson` |
 | Azure VM / その RG | 専用検証 VM の名前、完全なリソース ID |
-| Arc machine name | `onprem-win01`。既存 Arc リソースと重複させない |
+| Arc machine name | `onprem-win01`。対象 RG で一意の名前を選ぶ |
 | hub VNet / PE subnet | 空き IP のある PE 専用 subnet。例 `10.20.1.0/24` |
 | Resolver Inbound IP | 例 `10.20.2.4` |
 | Windows DNS IP | 実際の既存 DNS。任意ラボでは `10.30.1.5` |
@@ -32,7 +32,7 @@ Portal 右上のディレクトリと、各作成画面のサブスクリプシ�
 | 観測時間・タイムゾーン | 例、操作時刻は JST、Azure の照合は UTC |
 | 予算・通貨・期限・削除担当 | 利用者が決める。月額上限だけでなく停止時刻も記録 |
 
-AMPLS 自体の location はグローバルです。リージョンをそろえる対象と混同しないでください。DCE の設定取得先は監視対象と同じリージョン、DCR の送信先 LAW も同じリージョンにします。
+AMPLS 自体の location はグローバルです。DCE の設定取得先は監視対象と同じリージョン、DCR の送信先 LAW も同じリージョンにします。それぞれのリソースの配置を確認してください。
 
 ## 3. 権限とソフトウェアを確認する
 
@@ -44,18 +44,19 @@ AMPLS 自体の location はグローバルです。リージョンをそろえ�
 | Windows 担当 | 対象サーバーのローカル管理者、Windows DNS の変更権限 |
 | 閲覧担当 | 対象 LAW のクエリ権限 |
 
-最小権限の割り当ては組織の RBAC 方針で決めます。Owner を一律の前提にしません。Azure VM のマネージド ID 設定や既存ユーザー割り当て ID を上書きしないでください。
+最小権限の割り当ては組織の RBAC 方針で決め、担当ごとに必要なロールを付与してください。Azure VM に既存のユーザー割り当て ID がある場合は、利用先と維持すべき設定を確認します。既存 ID の不用意な置き換えはアプリケーションの認証を停止させるリスクがあるため、実施しないでください。
 
 - 管理端末: Azure Portal と、必要箇所で Azure CLI が動く PowerShell 7 / Cloud Shell。
 - Windows サーバー: 64-bit Windows PowerShell 5.1。スクリプトごとの `#Requires` に従う。
 - ソースを取得した管理端末とサーバー間に、承認されたファイル転送・管理接続があること。
-- PowerShell の実行ポリシーとコード署名の社内ルールを確認すること。署名が必要な場合は承認済みの署名手続きを行い、実行ポリシーや証明書検証を無効化して進めないこと。
+- ①の講師用ラボでは、hub に作成する Bastion Standard への HTTPS 接続と、VM / NIC / Bastion / 対象 VNet の Reader 権限を準備すること。VM 操作用のローカル管理者資格情報と、ファイル転送用の Windows 管理端末・Azure CLI 2.62.0 以降を用意すること。
+- PowerShell の実行ポリシーとコード署名の社内ルールを確認すること。署名が必要な場合は承認済みの署名手続きを行うこと。実行ポリシーや証明書検証の無効化は、改ざんされたスクリプトを実行するリスクがあるため、実施しないでください。
 - Arc と AMA の現行サポート対象 OS、TLS、署名検証、時刻同期を確認すること。
 - 利用するリソースプロバイダーの登録状況を Portal の「サブスクリプション → リソース プロバイダー」で確認すること。主に `Microsoft.Network`、`Microsoft.Compute`、`Microsoft.OperationalInsights`、`Microsoft.Insights`、`Microsoft.HybridCompute`、`Microsoft.GuestConfiguration` を使用する。登録には別途権限が必要。
 
-CLI の補助操作には `connectedmachine` と、DCE 関連付けを CLI で行う場合は `monitor-control-service` 拡張機能が必要です。管理端末で導入状況を `az extension list` で確認し、未導入なら承認された方法で追加してください。Windows サーバーに Azure CLI を導入する必要はありません。Arc の登録スクリプトは `azcmagent` 自体の手動認証を使用します。
+CLI の補助操作には `connectedmachine` と、DCE 関連付けを CLI で行う場合は `monitor-control-service` 拡張機能が必要です。管理端末で導入状況を `az extension list` で確認し、未導入なら承認された方法で追加してください。対象 Windows サーバーでの Arc 登録には、`azcmagent` 自体の手動認証を使用します。
 
-リポジトリの実行スクリプトは、利用者の認証情報を保存しません。開発用ワークスペースの `.env` やサービスプリンシパルをお客様環境にコピーする必要はありません。
+認証には実施者のアカウントを使用し、認証情報は組織の保管方針に従って管理してください。
 
 ## 4. 変更前に既存設定を確認する
 
@@ -71,9 +72,9 @@ CLI の補助操作には `connectedmachine` と、DCE 関連付けを CLI で�
 | 自動管理の適用 | Azure Policy、Defender、Arc 拡張機能の自動配布、SQL Server 自動登録の方針 | 今回以外の Agent / 有料機能が自動導入される影響が不明 |
 | DNS 利用者 | 変更前の正常応答、監視サービス名、既存 Blob サービス名の応答と利用状況 | 検証対象以外の疎通を確認できない |
 
-同じ DNS 解決範囲には、原則として単一の AMPLS を使用します。既存 AMPLS がある場合、②の「新規作成」を実行せず、既存 scope に対象リソースを追加できるかを管理者と設計してください。承認できなければ①の任意ラボ等の分離された検証環境を使います。
+同じ DNS 解決範囲には、原則として単一の AMPLS を使用します。既存 AMPLS がある場合は、既存 scope へ対象リソースを追加する設計を管理者と確認してください。同じ解決範囲への別 AMPLS の追加は既存監視の名前解決を変えるリスクがあるため、競合が解消するまで実施しないでください。既存環境への変更を承認できなければ、①の任意ラボ等の分離された検証環境を使います。
 
-`blob.core.windows.net` への転送は広い範囲に影響します。PE 用レコードだけでなく、既存の別 Blob アカウントが従来どおり使えることを確認してください。既存の同名条件付きフォワーダーを削除して新規作成する手順は採用しません。
+`blob.core.windows.net` への転送は広い範囲に影響します。PE 用レコードと既存の別 Blob アカウントの両方が想定どおり使えることを確認してください。同名の条件付きフォワーダーがある場合は、転送先・複製範囲・利用者を照合し、担当者と変更方法を決めてください。
 
 ## 5. 到達性と費用を確認する
 
@@ -84,9 +85,9 @@ CLI の補助操作には `connectedmachine` と、DCE 関連付けを CLI で�
 - オンプレミス Windows Server → AzFW Private IP: TCP 3128。
 - AzFW → 必須公開 FQDN: HTTPS / 443。現行の[Arc ネットワーク要件](https://learn.microsoft.com/azure/azure-arc/servers/network-requirements)で確認。
 
-NSG やオンプレミス Firewall の変更は対象サーバーに限定します。否定試験で共有 Firewall を停止したり、既存サーバーの公開通信を一括遮断したりしません。
+NSG やオンプレミス Firewall の変更は対象サーバーに限定します。共有 Firewall の停止や既存サーバーの公開通信の一括遮断は、業務通信を停止させるリスクがあるため、否定試験で実施しないでください。
 
-LAW の取り込み量と保持、PE、Resolver、Firewall、VM・ディスクなどに費用が発生します。Windows Event は Application の検証用イベントだけに絞り、Security ログや全イベントの収集を避けます。Azure Budget の通知は自動停止を保証しません。①の VM を停止しても Firewall、Resolver、PE 等の課金は残ります。
+LAW の取り込み量と保持、PE、Resolver、Firewall、VM・ディスクなどに費用が発生します。①では Bastion Standard と専用 Public IP の費用も含めてください。Windows Event は Application の検証用イベントだけに絞ってください。Security ログや全イベントの収集は、機密情報の取り込みや費用増加につながるため、本ハンズオンでは追加しないでください。Azure Budget の通知を受け取る担当者と、停止・削除を実施する担当者を決めます。①の VM を停止しても Bastion、Firewall、Resolver、PE 等の課金は残るため、終了時には対象を確認して削除してください。
 
 ## 6. 実行前の確認
 

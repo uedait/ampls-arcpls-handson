@@ -59,6 +59,7 @@ foreach ($key in @('workloadVmSize', 'dnsVmSize', 'hyperVVmSize')) {
     if (-not $generation -or $generation.value -notmatch 'V2') { throw "$size must support Gen2." }
 }
 Write-Host "Hyper-V host SKU: $($parameterObject.hyperVVmSize.value)"
+Write-Host 'The hub includes Azure Bastion Standard (2 scale units) and its dedicated Standard Public IP. Include both in the approved budget.'
 Write-Host 'SKU listing does not prove nested virtualization support, quota or deployable capacity.'
 if ((Read-Host 'Confirm documented nested-virtualization support, quota, costs and region: type APPROVE') -ne 'APPROVE') {
     throw 'Deployment not approved.'

@@ -47,6 +47,10 @@ resource hub 'Microsoft.Network/virtualNetworks@2023-11-01' = {
           ]
         }
       }
+      {
+        name: 'AzureBastionSubnet'
+        properties: { addressPrefix: '10.20.3.0/26' }
+      }
     ]
   }
 }
@@ -156,6 +160,32 @@ resource firewallPip 'Microsoft.Network/publicIPAddresses@2023-11-01' = {
   sku: { name: 'Standard' }
   properties: { publicIPAllocationMethod: 'Static' }
 }
+resource bastionPip 'Microsoft.Network/publicIPAddresses@2023-11-01' = {
+  name: '${prefix}-bastion-pip'
+  location: location
+  tags: tags
+  sku: { name: 'Standard' }
+  properties: { publicIPAllocationMethod: 'Static' }
+}
+resource bastion 'Microsoft.Network/bastionHosts@2023-11-01' = {
+  name: '${prefix}-bastion'
+  location: location
+  tags: tags
+  sku: { name: 'Standard' }
+  properties: {
+    scaleUnits: 2
+    enableTunneling: true
+    ipConfigurations: [
+      {
+        name: 'ipconfig'
+        properties: {
+          subnet: { id: hub.properties.subnets[3].id }
+          publicIPAddress: { id: bastionPip.id }
+        }
+      }
+    ]
+  }
+}
 resource policy 'Microsoft.Network/firewallPolicies@2023-11-01' = {
   name: '${prefix}-fw-policy'
   location: location
@@ -214,3 +244,5 @@ output resolverInboundIp string = '10.20.2.4'
 output firewallPrivateIp string = firewall.properties.ipConfigurations[0].properties.privateIPAddress
 output vmNames array = [for machine in machines: '${prefix}-${machine.role}']
 output privateEndpointSubnetId string = hub.properties.subnets[1].id
+output bastionName string = bastion.name
+output bastionResourceId string = bastion.id
