@@ -119,7 +119,7 @@ NSG は、VM が実際に送るパケットの宛先を判定します。Proxy �
 
 操作場所は対象サーバーの管理者 Windows PowerShell です。任意ラボでは L2 内です。
 
-1. `scripts\Install-ArcAgent.ps1` と `scripts\Connect-ArcServer.ps1` を承認された経路で対象にコピーします。
+1. ①の自動構築では L2 の `C:\Handson` に配置・検証済みの `Install-ArcAgent.ps1` と `Connect-ArcServer.ps1` を使用します。実際のオンプレミスを対象にする場合は、同じコミットの `scripts` 配下から承認された経路で配置してください。
 2. 既存 Arc が未導入の専用対象で、次を実行します。
 
    ```powershell

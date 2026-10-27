@@ -13,7 +13,7 @@ function Invoke-HandsonAz {
     if (-not $result) {
         throw "Azure CLI did not return JSON: az $($Arguments[0])."
     }
-    return (($result -join "`n") | ConvertFrom-Json -AsHashtable)
+    return (($result -join "`n") | ConvertFrom-Json -AsHashtable -Depth 100)
 }
 
 function Assert-HandsonAzContext {

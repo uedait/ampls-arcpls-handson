@@ -14,18 +14,109 @@ function Assert-NestedOfficialUri {
 }
 
 function Select-NestedImage {
-    param([Parameter(Mandatory)][object[]]$Images, [string]$ImageName)
+    param([Parameter(Mandatory)][object[]]$Images, [string]$ImageName, [switch]$DefaultEvaluation)
     $matches = @($Images | Where-Object {
         ([version]$_.Version).Build -eq 20348 -and
         $_.EditionId -match '^Server(Standard|Datacenter)(Eval)?$' -and
         $_.InstallationType -eq 'Server' -and
         "$($_.Architecture)" -in @('9', 'x64', 'amd64') -and
-        (-not $ImageName -or $_.ImageName -ceq $ImageName)
+        (-not $ImageName -or $_.ImageName -ceq $ImageName) -and
+        (-not $DefaultEvaluation -or ($_.EditionId -eq 'ServerStandardEval' -and
+            @($_.Languages | Where-Object { "$_" -match '^en-US(\s.*)?$' }).Count -gt 0))
     })
     if ($matches.Count -ne 1) {
         throw 'Select exactly one WS2022 x64 Standard/Datacenter Desktop Experience image with -ImageName. No fixed index is assumed.'
     }
     return $matches[0]
+}
+
+function Get-NestedMedia {
+    param(
+        [Parameter(Mandatory)][uri]$DownloadUri,
+        [Parameter(Mandatory)][string]$Cache,
+        [string]$Sha256,
+        [switch]$DefaultEvaluation
+    )
+    # Caller owns and locks Cache. Never log the request or an underlying exception.
+    Assert-NestedOfficialUri $DownloadUri
+    $name = if ($DefaultEvaluation) { 'ws2022-eval-english' } else { $Sha256.ToLowerInvariant() }
+    $path = Join-Path $Cache "$name.iso"
+    $record = Join-Path $Cache "$name.media.json"
+    [void](Assert-NestedLocalPath $path)
+    [void](Assert-NestedLocalPath $record)
+    $actual = $null
+    if ($DefaultEvaluation -and (Test-Path -LiteralPath $path)) {
+        if (-not (Test-Path -LiteralPath $record -PathType Leaf)) { throw 'Media cache record missing.' }
+        $saved = Get-Content -LiteralPath $record -Raw | ConvertFrom-Json
+        if ($saved.Schema -ne 'NestedOfficialMedia-v1' -or
+            $saved.SourceUri -cne $DownloadUri.AbsoluteUri -or
+            $saved.HashMeaning -ne 'CacheIntegrityOnly' -or
+            $saved.Length -ne 5044094976 -or (Get-Item -LiteralPath $path).Length -ne $saved.Length) {
+            throw 'Media cache record conflicts. No overwrite is allowed.'
+        }
+        $Sha256 = $saved.Sha256
+    }
+    if (-not (Test-Path -LiteralPath $path)) {
+        if (Test-Path -LiteralPath $record) { throw 'Orphan media record. Inspect manually.' }
+        $partial = "$path.partial"
+        if (Test-Path -LiteralPath $partial) { throw 'Partial ISO exists. Inspect manually before retrying.' }
+        $current = $DownloadUri
+        $downloaded = $false
+        for ($hop = 0; $hop -le 5; $hop++) {
+            Assert-NestedOfficialUri $current
+            $request = [Net.HttpWebRequest]::Create($current)
+            $request.AllowAutoRedirect = $false
+            $request.UseDefaultCredentials = $false
+            $request.Credentials = $null
+            $request.Timeout = 120000
+            $request.ReadWriteTimeout = 120000
+            $response = $null
+            try {
+                $response = $request.GetResponse()
+                Assert-NestedOfficialUri $response.ResponseUri
+                $status = [int]$response.StatusCode
+                if ($status -in @(301, 302, 303, 307, 308)) {
+                    $current = [uri]::new($current, $response.Headers['Location'])
+                    Assert-NestedOfficialUri $current
+                    continue
+                }
+                if ($status -ne 200 -or ($DefaultEvaluation -and $response.ContentLength -ne 5044094976)) {
+                    throw 'Unexpected media response.'
+                }
+                $stream = [IO.File]::Open($partial, 'CreateNew', 'Write', 'None')
+                try { $response.GetResponseStream().CopyTo($stream) }
+                finally { $stream.Dispose() }
+                if ($DefaultEvaluation -and (Get-Item -LiteralPath $partial).Length -ne 5044094976) {
+                    throw 'Unexpected media length.'
+                }
+                $downloaded = $true
+                break
+            }
+            catch { throw 'Official media download failed. Inspect retained partial media.' }
+            finally {
+                try { if ($response) { $response.Dispose() } }
+                finally { $request.Abort() }
+            }
+        }
+        if (-not $downloaded) { throw 'Media redirect limit exceeded.' }
+        $actual = (Get-FileHash -LiteralPath $partial -Algorithm SHA256).Hash
+        if ($DefaultEvaluation) { $Sha256 = $actual }
+        else { Assert-NestedSha256 -Actual $actual -Expected $Sha256 }
+        Move-Item -LiteralPath $partial -Destination $path -ErrorAction Stop
+        if ($DefaultEvaluation) {
+            Save-NestedManifest $record ([ordered]@{
+                Schema = 'NestedOfficialMedia-v1'; SourceUri = $DownloadUri.AbsoluteUri
+                Sha256 = $Sha256; Length = 5044094976; HashMeaning = 'CacheIntegrityOnly'
+            })
+        }
+    }
+    [void](Assert-NestedLocalPath $path)
+    if ((Get-Item -LiteralPath $path).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        throw 'Media reparse point rejected.'
+    }
+    if (-not $actual) { $actual = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash }
+    Assert-NestedSha256 -Actual $actual -Expected $Sha256
+    return [pscustomobject]@{ Path = $path; Sha256 = $Sha256 }
 }
 
 function New-NestedUnattendXml {

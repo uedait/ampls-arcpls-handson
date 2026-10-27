@@ -49,8 +49,9 @@ AMPLS 自体の location はグローバルです。DCE の設定取得先は監
 - 管理端末: Azure Portal と、必要箇所で Azure CLI が動く PowerShell 7 / Cloud Shell。
 - Windows サーバー: 64-bit Windows PowerShell 5.1。スクリプトごとの `#Requires` に従う。
 - ソースを取得した管理端末とサーバー間に、承認されたファイル転送・管理接続があること。
-- ①の講師用ラボでは、hub に作成する Bastion Standard への HTTPS 接続と、VM / NIC / Bastion / 対象 VNet の Reader 権限を準備すること。VM 操作用のローカル管理者資格情報と、ファイル転送用の Windows 管理端末・Azure CLI 2.62.0 以降を用意すること。
-- ①の L2 用に公式 Windows Server 2022 ISO の利用条件、HTTPS 取得 URL と公開元の SHA-256 を確認すること。ISO からの展開と無人セットアップは[専用ガイド](iso-build.md)に従い、構築中に必要な OS 更新・アクティベーションを確認すること。
+- ①の自動構築では、管理端末に PowerShell 7、Azure CLI、GitHub CLI と Bicep を用意すること。対象 RG の作成・デプロイと Managed Run Command の実行・VM 再起動を許可された Azure アカウント、対象 Private GitHub リポジトリの読み取り権限を持つアカウントを使用すること。
+- ①の完了確認では、hub の Bastion Standard への HTTPS 接続、VM / NIC / Bastion / 対象 VNet の Reader 権限、VM のローカル管理者資格情報を用意すること。補修時のファイル転送には Windows 管理端末のネイティブ RDP と Azure CLI 2.62.0 以降を使用すること。
+- L2 の自動構築はコードに定義した公式 Windows Server 2022 x64 英語評価版 ISO を使用すること。URL・SHA-256 を入力するヒアリングは省き、HTTPS 配布元の検査と取得後ハッシュによるキャッシュ照合を行う。[専用ガイド](iso-build.md)の評価条件と自動構築の範囲を確認すること。
 - PowerShell の実行ポリシーとコード署名の社内ルールを確認すること。署名が必要な場合は承認済みの署名手続きを行うこと。実行ポリシーや証明書検証の無効化は、改ざんされたスクリプトを実行するリスクがあるため、実施しないでください。
 - Arc と AMA の現行サポート対象 OS、TLS、署名検証、時刻同期を確認すること。
 - 利用するリソースプロバイダーの登録状況を Portal の「サブスクリプション → リソース プロバイダー」で確認すること。主に `Microsoft.Network`、`Microsoft.Compute`、`Microsoft.OperationalInsights`、`Microsoft.Insights`、`Microsoft.HybridCompute`、`Microsoft.GuestConfiguration` を使用する。登録には別途権限が必要。

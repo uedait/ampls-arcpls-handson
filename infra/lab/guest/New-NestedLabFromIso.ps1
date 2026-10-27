@@ -4,9 +4,15 @@
 param(
     [Parameter(Mandatory, ParameterSetName = 'Local')][string]$IsoPath,
     [Parameter(Mandatory, ParameterSetName = 'Download')][Alias('IsoUri')][uri]$DownloadUri,
-    [Parameter(Mandatory)][Alias('ExpectedSha256')][ValidatePattern('^[A-Fa-f0-9]{64}$')][string]$Sha256,
-    [Parameter(Mandatory)][uri]$HashSourceUri,
-    [Parameter(Mandatory)][switch]$AcceptedMediaTerms,
+    [Parameter(Mandatory, ParameterSetName = 'Default')][switch]$UseDefaultMedia,
+    [Parameter(Mandatory, ParameterSetName = 'Local')]
+    [Parameter(Mandatory, ParameterSetName = 'Download')]
+    [Alias('ExpectedSha256')][ValidatePattern('^[A-Fa-f0-9]{64}$')][string]$Sha256,
+    [Parameter(Mandatory, ParameterSetName = 'Local')]
+    [Parameter(Mandatory, ParameterSetName = 'Download')][uri]$HashSourceUri,
+    [Parameter(Mandatory, ParameterSetName = 'Local')]
+    [Parameter(Mandatory, ParameterSetName = 'Download')][switch]$AcceptedMediaTerms,
+    [pscredential]$Credential,
     [string]$ImageName,
     [string]$CacheDirectory = 'C:\NestedIsoCache',
     [string]$VmDirectory = 'C:\NestedIsoGuests',
@@ -21,7 +27,7 @@ Import-Module Hyper-V -ErrorAction Stop
 if (-not (Get-NetIPAddress -AddressFamily IPv4 | Where-Object IPAddress -eq '10.30.1.4') -or
     (Get-Service vmms).Status -ne 'Running') { throw 'Requires the running L1 Hyper-V host at 10.30.1.4.' }
 foreach ($file in @('New-NestedParentDisk.ps1', 'Initialize-NestedNetwork.ps1',
-    'Set-NestedGuest.ps1', 'Test-NestedImds.ps1')) {
+    'Set-NestedGuest.ps1', 'Test-NestedImds.ps1', 'Initialize-LabHandover.ps1', 'Test-LabNestedReadiness.ps1')) {
     if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot $file))) { throw "Missing companion: $file" }
 }
 $root = Assert-NestedLocalPath $VmDirectory
@@ -39,7 +45,10 @@ if ((Get-VM -Name $VmName -ErrorAction SilentlyContinue) -or
     throw "VM or guest directory already exists. Inspect $statePath manually. No resume, overwrite, or automatic deletion is supported."
 }
 if (Test-Path -LiteralPath $root) {
-    if (-not (Test-Path -LiteralPath (Join-Path $root 'nested-guests.marker')) -or
+    $ownerMarker = Join-Path $root 'nested-guests.marker'
+    [void](Assert-NestedLocalPath $ownerMarker)
+    if (-not (Test-Path -LiteralPath $ownerMarker -PathType Leaf) -or
+        (Get-Content -LiteralPath $ownerMarker -Raw) -cne 'NestedIsoGuests-v1' -or
         ((Get-Item -LiteralPath $root).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
         throw 'Existing guest root is not an owned, non-reparse nested guest directory.'
     }
@@ -50,16 +59,21 @@ else {
     [IO.File]::WriteAllText((Join-Path $root 'nested-guests.marker'), 'NestedIsoGuests-v1')
 }
 Protect-NestedDirectory $root
-$credential = Get-Credential -UserName 'Administrator' -Message 'L2 built-in Administrator password; never enter it on a command line'
+if (-not $Credential) {
+    $Credential = Get-Credential -UserName 'Administrator' -Message 'L2 built-in Administrator password; never enter it on a command line'
+}
 if (-not $credential) { throw 'Credential input was cancelled.' }
 $answer = New-NestedUnattendXml -ComputerName $VmName -TimeZone $TimeZone -Credential $credential
-$parentArgs = @{
-    Sha256 = $Sha256; HashSourceUri = $HashSourceUri; CacheDirectory = $CacheDirectory
-    AcceptedMediaTerms = $AcceptedMediaTerms; DiskSizeGB = $DiskSizeGB
+$parentArgs = @{ CacheDirectory = $CacheDirectory; DiskSizeGB = $DiskSizeGB }
+if ($UseDefaultMedia) { $parentArgs.UseDefaultMedia = $true }
+else {
+    $parentArgs.Sha256 = $Sha256
+    $parentArgs.HashSourceUri = $HashSourceUri
+    $parentArgs.AcceptedMediaTerms = $AcceptedMediaTerms
 }
 if ($ImageName) { $parentArgs.ImageName = $ImageName }
 if ($PSCmdlet.ParameterSetName -eq 'Download') { $parentArgs.DownloadUri = $DownloadUri }
-else { $parentArgs.IsoPath = $IsoPath }
+elseif (-not $UseDefaultMedia) { $parentArgs.IsoPath = $IsoPath }
 $session = $null
 $direct = $null
 $mounted = $false
@@ -144,26 +158,61 @@ try {
         -ArgumentList "$($vm.BiosGuid)" -ErrorAction Stop
     Invoke-Command -Session $session -FilePath (Join-Path $PSScriptRoot 'Test-NestedImds.ps1') `
         -ArgumentList "$($vm.BiosGuid)" -ErrorAction Stop
+    $stage = 'HandoverScripts'
+    $scriptsDirectory = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\..\scripts'))
+    $hashes = @{}
+    Invoke-Command -Session $session -FilePath (Join-Path $PSScriptRoot 'Initialize-LabHandover.ps1') `
+        -ArgumentList "$($vm.BiosGuid)" -ErrorAction Stop | Out-Null
+    foreach ($name in @('Install-ArcAgent.ps1', 'Connect-ArcServer.ps1', 'Write-HandsonEvent.ps1')) {
+        $source = Join-Path $scriptsDirectory $name
+        $hashes[$name] = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
+        $exists = Invoke-Command -Session $session -ArgumentList $name, $hashes[$name] -ScriptBlock {
+            param($Name, $Expected)
+            $ErrorActionPreference = 'Stop'
+            $path = Join-Path 'C:\Handson' $Name
+            if (-not (Test-Path -LiteralPath $path)) { return $false }
+            if ((Get-Item -LiteralPath $path -Force).Attributes -band [IO.FileAttributes]::ReparsePoint -or
+                (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -ne $Expected) {
+                throw 'Existing handover file conflicts. No overwrite is allowed.'
+            }
+            return $true
+        } -ErrorAction Stop
+        if (-not $exists) { Copy-Item -LiteralPath $source -Destination "C:\Handson\$name" -ToSession $session -ErrorAction Stop }
+    }
+    $stage = 'Activation'
+    # Legitimate evaluation activation only. No product key changes or rearm.
+    Invoke-Command -Session $session -ScriptBlock {
+        $ErrorActionPreference = 'Stop'
+        & "$env:SystemRoot\System32\cscript.exe" //nologo "$env:SystemRoot\System32\slmgr.vbs" /ato | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'Windows activation command failed.' }
+    } -ErrorAction Stop | Out-Null
     $stage = 'ActivationStatusRead'
     $activation = @(Invoke-Command -Session $session -ScriptBlock {
         $ErrorActionPreference = 'Stop'
-        Get-CimInstance SoftwareLicensingProduct -Filter "ApplicationID='55c92734-d682-4d71-983e-d6ec3f16059f' AND PartialProductKey IS NOT NULL" |
+        Get-CimInstance SoftwareLicensingProduct -Filter "ApplicationID='55c92734-d682-4d71-983e-d6ec3f16059f' AND PartialProductKey IS NOT NULL AND LicenseIsAddon=FALSE" |
             Select-Object Name, Description, LicenseStatus, GracePeriodRemaining
     } -ErrorAction Stop)
-    if ($activation.Count -eq 0) { throw 'No Windows licensing status was returned. Complete activation checks manually.' }
-    $activation | Select-Object Name, Description, LicenseStatus, GracePeriodRemaining | Format-Table | Out-Host
+    if ($activation.Count -eq 0) { throw 'No Windows licensing status was returned.' }
     $state.ActivationChecked = $true
     if (@($activation | Where-Object LicenseStatus -eq 1).Count -eq 0) {
-        Write-Warning 'Windows is not reported as Licensed (LicenseStatus=1). Complete legitimate activation while Internet is permitted; do not proceed to Internet deny.'
+        throw 'Windows is not Licensed (LicenseStatus=1). Internet deny is not permitted.'
     }
+    $stage = 'BuildReadiness'
+    $readiness = Invoke-Command -Session $session -FilePath (Join-Path $PSScriptRoot 'Test-LabNestedReadiness.ps1') `
+        -ArgumentList "$($vm.BiosGuid)", $hashes, $false -ErrorAction Stop
+    if (-not $readiness.NestedReady) { throw 'L2 readiness failed.' }
+    $state.BiosGuid = "$($vm.BiosGuid)"
+    $state.HandoverHashes = $hashes
+    $state.UpdatesBaseline = 'StandardImageOnly'
     $stage = 'SessionCleanup'
     Remove-PSSession -Session $session -ErrorAction Stop
     $session = $null
     $direct.Pipeline.Dispose()
     $direct = $null
+    $state.InternetDenyReady = $true
     $state.Status = 'Configured'
     Save-NestedManifest $statePath $state
-    Write-Host 'L2 configured and tested. Activation status was read, not changed. Updates and activation completion require operator review before Internet deny.'
+    Write-Host 'L2 configured, Licensed and readiness checked. Updates baseline is the standard image; no full Windows Update completion is claimed.'
     Write-Host "Child VHDX remains sensitive (deleted answer-file blocks may persist): $childPath"
 }
 catch {
@@ -176,6 +225,7 @@ catch {
     elseif ($_.Exception.Message -match 'Select exactly one WS2022') { $kind = 'ImageSelectionRequired' }
     if ($state) {
         $state.Status = 'Failed'
+        $state.InternetDenyReady = $false
         $state.FailureStage = $stage
         $state.FailureKind = $kind
         Save-NestedManifest $statePath $state

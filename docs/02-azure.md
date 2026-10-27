@@ -146,7 +146,7 @@ Portal で設定取得用 DCE の関連付けが選べない場合は、管理�
 
 ## 2-7. 検証用イベントを1件送る
 
-1. 対象 Azure VM に `scripts\Write-HandsonEvent.ps1` をコピーします。①の講師用ラボでは、[Bastion のネイティブ RDP 接続](01-lab.md)を使用してください。
+1. 対象 Azure VM で `scripts\Write-HandsonEvent.ps1` を用意します。①の自動構築では VM が取得・検証した同じコミットのソースに含まれるファイルを使用してください。既存環境に配置する場合は、承認された転送手段を使用します。
 2. 管理者の Windows PowerShell で実行します。
 
    ```powershell

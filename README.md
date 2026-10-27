@@ -2,12 +2,14 @@
 
 ![サンプル全体構成](docs/images/01-architecture.png)
 
-既存の Azure Windows VM とオンプレミスの Windows Server から、Private Link 経由で同じ Log Analytics Workspace にログを収集します。Azure Portal を中心に操作し、Windows 内の設定と Portal だけでは設定できない項目に PowerShell / Azure CLI を使用します。
+Azure Monitor Private Link と Azure Arc Private Link を使用し、Azure VM とオンプレミスの Windows Server からのログ収集を行うハンズオンです。
+基本的には Azure Portal を中心に操作し、Windows 内の設定と Portal だけでは設定できない項目に PowerShell / Azure CLI を使用します。
 
-本編は②と③です。お客様が既存環境を使用する場合は、事前確認を終えて②③へ進んでください。①は Azure 上に疑似オンプレミス環境を用意する講師・検証者向けの章です。
+- ① : Azure 上に疑似オンプレミス環境を用意する章です。すでに環境があれば skip できます。
+- ② : Azure VM からのログ収集のハンズオンを行う章です。
+- ③ : オンプレミスマシンのログ収集のハンズオンを行う章です。
 
 ## 資料を取得する
-
 Private リポジトリを使用する場合、閲覧権限のある GitHub アカウントで取得してください。Git を使わない場合は「Code → Download ZIP」で取得して展開できます。管理端末の PowerShell では次を使用します。
 
 ```powershell
@@ -34,12 +36,15 @@ Set-Location .\ampls-arcpls-handson
 
 ## このハンズオンで確かめること
 
-1. Azure VM に Azure Monitor Agent（AMA）を導入し、AMPLS の Private Endpoint に直接接続して Windows イベントを収集すること。
-2. オンプレミスの VM（※）に Connected Machine Agent（Arc Agent）と AMA を導入し、AMPLS の Private Endpoint に直接接続して Windows イベントを収集すること。
-3. オンプレミスの VM（※）の Arc 管理通信が、Arc PLS の専用 Private Endpoint に直接接続すること。
-4. オンプレミスの VM（※）の Arc が Entra ID・ARM 等へ行う必要な公開通信を、Arc Agent 固有の Proxy 設定で Azure Firewall（Explicit Proxy）経由のインターネットアクセスとして実現すること。
-5. オンプレミスの DNS（※）に指定した7ドメインの条件付きフォワーダーを追加し、Azure DNS Private Resolver に転送すること。
-6. Azure Firewall で指定した FQDN を許可し、Entra ID・ARM 等への必要な公開通信が成功すること。
+- Azure VM の 監視
+  - 1. Azure VM に Azure Monitor Agent（AMA）を導入し、AMPLS の Private Endpoint に直接接続して Windows イベントを収集すること。
+- オンプレ VM の監視
+  - 2. オンプレミスの VM（※）に Connected Machine Agent（Arc Agent）と AMA を導入し、AMPLS の Private Endpoint に直接接続して Windows イベントを収集すること。
+  - 3. オンプレミスの VM（※）の Arc 管理通信が、Arc PLS の専用 Private Endpoint に直接接続すること。
+  - 4. オンプレミスの VM（※）の Arc が Entra ID・ARM 等へ行う必要な公開通信を、Arc Agent 固有の Proxy 設定で Azure Firewall（Explicit Proxy）経由のインターネットアクセスとして実現すること。
+- 既存環境への影響
+  - 5. オンプレミスの DNS（※）に指定した7ドメインの条件付きフォワーダーを追加し、Azure DNS Private Resolver に転送すること。
+  - 6. Azure Firewall で指定した FQDN を許可し、Entra ID・ARM 等への必要な公開通信が成功すること。
 
 ※ このラボでは、Azure 上に疑似的なオンプレミス環境を用意します。
 
@@ -52,14 +57,8 @@ Set-Location .\ampls-arcpls-handson
 - ①の講師用ラボでは hub の Azure Bastion Standard から各 Azure VM を操作します。L2 は L1 の VMConnect / PowerShell Direct 経由で操作してください。Bastion と専用 Public IP の費用も予算に含めます。
 - ①の構築中は3台それぞれの PIP で外向き通信を行い、[公式 ISO から L2 を自動構築](docs/iso-build.md)します。①の最後に各 NIC の NSG を Restricted に切り替え、②③は直接の Internet 通信を遮断した状態で実施します。PIP は関連付けたまま維持し、NSG で通信を制御してください。
 
-## 資料とスクリプトを編集する場合
-
-各章の Microsoft Learn を参照して手順と設定値を確認してください。Portal の画面名は言語や更新によって変わる場合があります。資料やスクリプトを編集した場合は、PowerShell 7 から次のローカル検査を実行してください。検査対象は構文、相対リンク、ファイル整合性と合成 CLI の動作です。
-
-```powershell
-.\scripts\Test-Handson.ps1
-```
-
-任意ラボの Bicep コンパイル等は `.\infra\lab\Test-LabStatic.ps1` で確認します。ローカルに Azure CLI と Bicep が必要です。`Test-Handson.ps1` の合成 CLI 試験は Windows 向けです。ほかの OS で静的確認だけを行う場合は `-SkipMockTests` を指定し、合成試験は未実施として扱います。
-
-認証情報と作業記録は、アクセスを制限した保管先で管理してください。実際の環境値や採取ログをローカルに保存する場合は Git 対象外の `.local` 配下に置きます。`.env`、認証用証明書、秘密鍵、パスワード、認証キャッシュを Git に追加すると、リポジトリの閲覧者に認証情報が漏れるリスクがあるため、追加しないでください。
+## 免責
+- Hands-on の作成日は `2026-10-27` です。
+- 内容は正確性を期してはいますが、内容を保証するものではありません。
+- また、仕様、手順、設定個所、Portal 画面などは、今後の更新などによって変わる場合があります。
+- 詳細は、公式のドキュメント(Microsoft Learn)も参照して、手順と設定値を確認してください。各章に関連しそうなリンクを記載してあります。

@@ -72,4 +72,5 @@ if ($SkipMockTests) {
     Write-Warning 'Synthetic CLI tests were explicitly skipped.'
 } else {
     & (Join-Path $root 'tests\Invoke-LocalTests.ps1')
+    & (Join-Path $root 'tests\Test-LabAutomation.ps1')
 }

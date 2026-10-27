@@ -232,6 +232,7 @@ module vms 'modules/windows-vm.bicep' = [for machine in machines: {
     privateIp: machine.ip
     adminUsername: adminUsername
     adminPassword: adminPassword
+    initialDnsServers: machine.role == 'workload' ? ['10.20.2.4'] : ['168.63.129.16']
   }
   // resourceId() builds a string and does not infer a resource dependency.
   dependsOn: [

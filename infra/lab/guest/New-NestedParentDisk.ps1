@@ -4,12 +4,17 @@
 param(
     [Parameter(Mandatory, ParameterSetName = 'Local')][string]$IsoPath,
     [Parameter(Mandatory, ParameterSetName = 'Download')][Alias('IsoUri')][uri]$DownloadUri,
-    [Parameter(Mandatory)][Alias('ExpectedSha256')][ValidatePattern('^[A-Fa-f0-9]{64}$')][string]$Sha256,
-    [Parameter(Mandatory)][uri]$HashSourceUri,
+    [Parameter(Mandatory, ParameterSetName = 'Default')][switch]$UseDefaultMedia,
+    [Parameter(Mandatory, ParameterSetName = 'Local')]
+    [Parameter(Mandatory, ParameterSetName = 'Download')]
+    [Alias('ExpectedSha256')][ValidatePattern('^[A-Fa-f0-9]{64}$')][string]$Sha256,
+    [Parameter(Mandatory, ParameterSetName = 'Local')]
+    [Parameter(Mandatory, ParameterSetName = 'Download')][uri]$HashSourceUri,
     [Parameter(Mandatory)][string]$CacheDirectory,
     [string]$ImageName,
     [ValidateRange(60, 2048)][int]$DiskSizeGB = 60,
-    [Parameter(Mandatory)][switch]$AcceptedMediaTerms
+    [Parameter(Mandatory, ParameterSetName = 'Local')]
+    [Parameter(Mandatory, ParameterSetName = 'Download')][switch]$AcceptedMediaTerms
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'NestedIso.Helpers.ps1')
@@ -20,18 +25,24 @@ if (-not (Get-NetIPAddress -AddressFamily IPv4 | Where-Object IPAddress -eq '10.
 if (([version](Get-CimInstance Win32_OperatingSystem).Version).Build -ne 20348) {
     throw 'Only Windows Server 2022 L1 (build 20348) is supported by this workflow.'
 }
-if (-not $AcceptedMediaTerms) { throw 'Review the Microsoft media terms before continuing.' }
-if (-not $HashSourceUri.IsAbsoluteUri -or $HashSourceUri.Scheme -ne 'https' -or
+if ($UseDefaultMedia) {
+    $DownloadUri = [uri]'https://software-static.download.prss.microsoft.com/sg/download/888969d5-f34g-4e03-ac9d-1f9786c66749/SERVER_EVAL_x64FRE_en-us.iso'
+}
+elseif (-not $AcceptedMediaTerms) { throw 'Review the Microsoft media terms before continuing.' }
+if (-not $UseDefaultMedia -and (-not $HashSourceUri.IsAbsoluteUri -or $HashSourceUri.Scheme -ne 'https' -or
     $HashSourceUri.UserInfo -or $HashSourceUri.Fragment -or $HashSourceUri.Query -or
     $HashSourceUri.Port -ne 443 -or
     ($HashSourceUri.DnsSafeHost -ne 'microsoft.com' -and
-        -not $HashSourceUri.DnsSafeHost.EndsWith('.microsoft.com'))) {
+        -not $HashSourceUri.DnsSafeHost.EndsWith('.microsoft.com')))) {
     throw 'HashSourceUri must identify the Microsoft HTTPS publication of the expected SHA256.'
 }
 $cache = Assert-NestedLocalPath $CacheDirectory
 if (Test-Path -LiteralPath $cache) {
     # Do not silently take ownership of an unrelated pre-existing directory.
-    if (-not (Test-Path -LiteralPath (Join-Path $cache 'nested-cache.marker'))) {
+    $ownerMarker = Join-Path $cache 'nested-cache.marker'
+    [void](Assert-NestedLocalPath $ownerMarker)
+    if (-not (Test-Path -LiteralPath $ownerMarker -PathType Leaf) -or
+        (Get-Content -LiteralPath $ownerMarker -Raw) -cne 'NestedIsoCache-v1') {
         throw 'Existing directory is not an owned nested image cache.'
     }
     if ((Get-Item -LiteralPath $cache).Attributes -band [IO.FileAttributes]::ReparsePoint) {
@@ -44,56 +55,25 @@ else {
     [IO.File]::WriteAllText((Join-Path $cache 'nested-cache.marker'), 'NestedIsoCache-v1')
 }
 Protect-NestedDirectory $cache
-$lock = [IO.File]::Open((Join-Path $cache 'cache.lock'), 'OpenOrCreate', 'ReadWrite', 'None')
+$lockPath = Join-Path $cache 'cache.lock'
+[void](Assert-NestedLocalPath $lockPath)
+$lock = [IO.File]::Open($lockPath, 'OpenOrCreate', 'ReadWrite', 'None')
 $isoMounted = $false
 $vhdMounted = $false
 $manifest = $null
 $manifestPath = $null
 try {
-    if ($PSCmdlet.ParameterSetName -eq 'Download') {
-        $IsoPath = Join-Path $cache ("{0}.iso" -f $Sha256.ToLowerInvariant())
-        if (-not (Test-Path -LiteralPath $IsoPath)) {
-            $partial = "$IsoPath.partial"
-            if (Test-Path -LiteralPath $partial) { throw 'Partial ISO exists. Inspect it manually before retrying.' }
-            $current = $DownloadUri
-            $downloaded = $false
-            for ($hop = 0; $hop -le 5; $hop++) {
-                Assert-NestedOfficialUri $current
-                $request = [Net.HttpWebRequest]::Create($current)
-                $request.AllowAutoRedirect = $false
-                $request.UseDefaultCredentials = $false
-                $request.Credentials = $null
-                $request.Timeout = 120000
-                $request.ReadWriteTimeout = 120000
-                $response = $null
-                try {
-                    $response = $request.GetResponse()
-                    Assert-NestedOfficialUri $response.ResponseUri
-                    $status = [int]$response.StatusCode
-                    if ($status -in @(301, 302, 303, 307, 308)) {
-                        $current = [uri]::new($current, $response.Headers['Location'])
-                        Assert-NestedOfficialUri $current
-                        continue
-                    }
-                    if ($status -ne 200) { throw 'Unexpected media HTTP status.' }
-                    $stream = [IO.File]::Open($partial, 'CreateNew', 'Write', 'None')
-                    try { $response.GetResponseStream().CopyTo($stream) }
-                    finally { $stream.Dispose() }
-                    $downloaded = $true
-                    break
-                }
-                catch { throw 'Official media download failed; URL details are intentionally omitted. Inspect retained partial media.' }
-                finally { if ($response) { $response.Dispose() } }
-            }
-            if (-not $downloaded) { throw 'Media redirect limit exceeded.' }
-            Assert-NestedSha256 -Actual (Get-FileHash -LiteralPath $partial -Algorithm SHA256).Hash -Expected $Sha256
-            Move-Item -LiteralPath $partial -Destination $IsoPath
-        }
+    if ($PSCmdlet.ParameterSetName -in @('Download', 'Default')) {
+        $media = Get-NestedMedia -DownloadUri $DownloadUri -Cache $cache -Sha256 $Sha256 -DefaultEvaluation:$UseDefaultMedia
+        $IsoPath = $media.Path
+        $Sha256 = $media.Sha256
     }
     $iso = Get-Item -LiteralPath $IsoPath
     [void](Assert-NestedLocalPath $iso.FullName)
     if ($iso.Extension -ne '.iso') { throw 'Invalid ISO input. No image will be applied.' }
-    Assert-NestedSha256 -Actual (Get-FileHash -LiteralPath $iso.FullName -Algorithm SHA256).Hash -Expected $Sha256
+    if ($PSCmdlet.ParameterSetName -eq 'Local') {
+        Assert-NestedSha256 -Actual (Get-FileHash -LiteralPath $iso.FullName -Algorithm SHA256).Hash -Expected $Sha256
+    }
     $IsoPath = $iso.FullName
     if ((Get-DiskImage -ImagePath $IsoPath).Attached) { throw 'ISO is already mounted; no existing mount will be reused.' }
     [void](Mount-DiskImage -ImagePath $IsoPath -StorageType ISO -PassThru)
@@ -105,10 +85,12 @@ try {
     $images = @(Get-WindowsImage -ImagePath $wim | ForEach-Object {
         Get-WindowsImage -ImagePath $wim -Index $_.ImageIndex
     })
-    $selected = Select-NestedImage -Images $images -ImageName $ImageName
+    $selected = Select-NestedImage -Images $images -ImageName $ImageName -DefaultEvaluation:$UseDefaultMedia
     $key = '{0}-{1}-{2}GB' -f $Sha256.ToLowerInvariant(), $selected.ImageIndex, $DiskSizeGB
     $parentPath = Join-Path $cache "$key.vhdx"
     $manifestPath = Join-Path $cache "$key.json"
+    [void](Assert-NestedLocalPath $parentPath)
+    [void](Assert-NestedLocalPath $manifestPath)
     if (Test-Path -LiteralPath $manifestPath) {
         $existing = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
         if ($existing.Status -ne 'Ready' -or $existing.IsoSha256 -ne $Sha256 -or
@@ -123,7 +105,10 @@ try {
     if (Test-Path -LiteralPath $parentPath) { throw 'Parent disk exists without a manifest. Refusing overwrite.' }
     $manifest = [ordered]@{
         Status = 'Building'; IsoSha256 = $Sha256.ToUpperInvariant()
-        HashSourceUri = $HashSourceUri.AbsoluteUri; ImageIndex = $selected.ImageIndex
+        SourceUri = $(if ($UseDefaultMedia) { $DownloadUri.AbsoluteUri } else { $null })
+        HashSourceUri = $(if ($UseDefaultMedia) { $null } else { $HashSourceUri.AbsoluteUri })
+        HashMeaning = $(if ($UseDefaultMedia) { 'CacheIntegrityOnly' } else { 'OperatorSuppliedExpectedHash' })
+        ImageIndex = $selected.ImageIndex
         ImageName = $selected.ImageName; Version = "$($selected.Version)"
         EditionId = $selected.EditionId; InstallationType = $selected.InstallationType
         ParentPath = $parentPath; ParentSha256 = $null; DiskSizeGB = $DiskSizeGB

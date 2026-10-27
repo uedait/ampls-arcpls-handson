@@ -52,13 +52,14 @@ AMPLS の PE は複数の IP を使用します。PE の DNS 構成画面に表�
 
 Inbound endpoint が配置された hub VNet に zone をリンクします。このサンプルの転送方向はオンプレミスから Azure です。Resolver は Inbound endpoint を使用します。
 
-## お客様環境と任意ラボの違い
+## 疑似環境について
 
-お客様は既存の ExpressRoute 等で、オンプレミスから hub の DNS / PE / Proxy に到達できることが前提です。①の任意ラボは VNet Peering でこの到達性を代用します。ExpressRoute の帯域、ゲートウェイ、経路伝播、SLA は、お客様の実際の接続環境で評価してください。
+疑似環境では Azure VM 内に Hyper-V を構成し、その L2 ゲストだけを Arc に登録します。
+L1 ホストは Azure VM として管理します。L2 は Internal vSwitch と WinNAT を使用し、Azure / Azure Local IMDS への接続を遮断します。
+この構成は Azure 内の評価用です。本番環境への適用時は、実際のサーバーと接続方式に合わせて設計してください。
 
-任意ラボでは Azure VM 内に Hyper-V を構成し、その L2 ゲストだけを Arc に登録します。L1 ホストは Azure VM として管理します。L2 は Internal vSwitch と WinNAT を使用し、Azure / Azure Local IMDS への接続を遮断します。この構成は Azure 内の評価用です。本番環境への適用時は、実際のサーバーと接続方式に合わせて設計してください。
-
-講師用の管理接続には hub の `AzureBastionSubnet`（`10.20.3.0/26`）へ Bastion Standard をデプロイします。ブラウザーから3台の Azure VM を操作し、ファイル転送には有効化済みのネイティブ RDP 接続を使います。L2 は L1 の VMConnect / PowerShell Direct を使用してください。Firewall・Bastion・3台の VM が、それぞれ専用 Public IP を持ちます。VM の管理接続は Private IP 経由に統一します。お客様が既存環境で②③を実施する場合は、既存の承認済み管理接続を使用してください。
+講師用の管理接続には hub の `AzureBastionSubnet`（`10.20.3.0/26`）へ Bastion Standard をデプロイします。ブラウザーから3台の Azure VM を操作し、ファイル転送には有効化済みのネイティブ RDP 接続を使います。L2 は L1 の VMConnect / PowerShell Direct を使用してください。Firewall・Bastion・3台の VM が、それぞれ専用 Public IP を持ちます。VM の管理接続は Private IP 経由に統一します。
+既存環境で②③を実施する場合は、既存の承認済み管理接続を使用してください。
 
 ## ①の構築用通信と②③の演習用通信
 

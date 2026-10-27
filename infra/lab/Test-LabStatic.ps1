@@ -69,8 +69,17 @@ else {
                 }
             }
             foreach ($nic in @($guestResources | Where-Object type -eq 'Microsoft.Network/networkInterfaces')) {
+                if ([string]$nic.properties.dnsSettings.dnsServers -notmatch 'initialDnsServers') {
+                    $failures.Add('VM NIC must declare the explicit bootstrap DNS input.')
+                }
                 if (-not $nic.properties.networkSecurityGroup.id) {
                     $failures.Add('VM NIC must reference its dedicated NSG.')
+                }
+                $vmDeployment = @($template.resources | Where-Object type -eq 'Microsoft.Resources/deployments')
+                if ($vmDeployment.Count -ne 1 -or
+                    [string]$vmDeployment[0].properties.parameters.initialDnsServers -notmatch '168.63.129.16' -or
+                    [string]$vmDeployment[0].properties.parameters.initialDnsServers -notmatch '10.20.2.4') {
+                    $failures.Add('onpre bootstrap DNS must use Azure DNS; workload must use the hub Resolver.')
                 }
                 foreach ($configuration in $nic.properties.ipConfigurations) {
                     if (-not $configuration.properties.publicIPAddress.id) {

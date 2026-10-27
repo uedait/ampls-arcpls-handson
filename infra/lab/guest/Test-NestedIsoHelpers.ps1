@@ -49,7 +49,7 @@ function New-SyntheticImage {
     param([int]$Index, [string]$Name, [string]$Edition, [string]$Type, [string]$Version = '10.0.20348.1')
     return [pscustomobject]@{
         ImageIndex = $Index; ImageName = $Name; EditionId = $Edition
-        InstallationType = $Type; Version = $Version; Architecture = 9
+        InstallationType = $Type; Version = $Version; Architecture = 9; Languages = @('en-US')
     }
 }
 $desktop = New-SyntheticImage 7 'Synthetic Desktop' 'ServerDatacenterEval' 'Server'
@@ -62,6 +62,16 @@ Assert-True ((Select-NestedImage @($desktop, $standard) 'Synthetic Standard Desk
 Assert-Throws { Select-NestedImage @($newer) } 'Reject Windows Server 2025'
 Assert-Throws { Select-NestedImage @($core) } 'Reject Server Core'
 Assert-Throws { Select-NestedImage @($desktop) 'Missing' } 'Reject nonexistent image name'
+Assert-True ((Select-NestedImage @($desktop, $standard) -DefaultEvaluation).ImageIndex -eq 11) 'Default uses English Standard Evaluation metadata'
+Assert-Throws { Select-NestedImage @($desktop) -DefaultEvaluation } 'Default must not silently choose another edition'
+$localized = New-SyntheticImage 12 'Synthetic Japanese' 'ServerStandardEval' 'Server'
+$localized.Languages = @('ja-JP')
+Assert-Throws { Select-NestedImage @($localized) -DefaultEvaluation } 'Default rejects non-English media'
+$retail = New-SyntheticImage 13 'Synthetic Retail' 'ServerStandard' 'Server'
+Assert-Throws { Select-NestedImage @($retail) -DefaultEvaluation } 'Default rejects non-Evaluation edition'
+$arm = New-SyntheticImage 14 'Synthetic ARM' 'ServerStandardEval' 'Server'
+$arm.Architecture = 12
+Assert-Throws { Select-NestedImage @($arm) -DefaultEvaluation } 'Default rejects ARM64'
 
 # Synthetic test value only. Never print the generated XML or password.
 $sample = 'Synthetic<&>"''Pass!2026'

@@ -4,6 +4,7 @@ param vmSize string
 param subnetId string
 param privateIp string
 param adminUsername string
+param initialDnsServers array
 @secure()
 param adminPassword string
 
@@ -157,6 +158,7 @@ resource nic 'Microsoft.Network/networkInterfaces@2023-11-01' = {
   name: '${name}-nic'
   location: location
   properties: {
+    dnsSettings: { dnsServers: initialDnsServers }
     networkSecurityGroup: { id: nsg.id }
     ipConfigurations: [
       {
