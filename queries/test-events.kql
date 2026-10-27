@@ -1,0 +1,7 @@
+Event
+| where TimeGenerated > ago(30m)
+| where Source == "AmplsArcHandson" and EventID == 9001
+| project TimeGenerated, IngestedAt=ingestion_time(), Computer, EventID,
+          Source, RenderedDescription, _ResourceId
+| order by TimeGenerated desc
+| take 100

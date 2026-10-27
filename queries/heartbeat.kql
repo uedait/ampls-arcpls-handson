@@ -1,0 +1,5 @@
+Heartbeat
+| where TimeGenerated > ago(30m)
+| summarize LastHeartbeat=max(TimeGenerated), Records=count() by Computer, _ResourceId
+| order by LastHeartbeat desc
+| take 100
