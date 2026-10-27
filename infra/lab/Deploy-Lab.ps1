@@ -60,6 +60,8 @@ foreach ($key in @('workloadVmSize', 'dnsVmSize', 'hyperVVmSize')) {
 }
 Write-Host "Hyper-V host SKU: $($parameterObject.hyperVVmSize.value)"
 Write-Host 'The hub includes Azure Bastion Standard (2 scale units) and its dedicated Standard Public IP. Include both in the approved budget.'
+Write-Host 'Each of the three VMs also has a dedicated Standard Public IP and NIC NSG. Outbound Internet starts in Build mode.'
+Write-Host 'After ISO/guest preparation, run Set-LabInternetAccess.ps1 -Mode Restricted before starting chapters 02/03.'
 Write-Host 'SKU listing does not prove nested virtualization support, quota or deployable capacity.'
 if ((Read-Host 'Confirm documented nested-virtualization support, quota, costs and region: type APPROVE') -ne 'APPROVE') {
     throw 'Deployment not approved.'

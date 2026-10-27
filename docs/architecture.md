@@ -26,10 +26,11 @@ LAW は Log Analytics Workspace、DCE は Data Collection Endpoint、DCR は Dat
 | Arc の HIS / Guest Configuration | Arc PLS PE へ直接 HTTPS | `proxy.bypass=Arc`、Arc PLS への関連付け |
 | Arc の Entra ID / ARM 等の公開宛先 | AzFW Explicit Proxy → HTTPS の宛先 | `proxy.url=http://<FW のプライベート IP>:3128` |
 | オンプレミスからの対象7ドメインの DNS | Windows DNS → Inbound endpoint → Private DNS zone | 条件付きフォワーダー |
-| インストーラー取得 | ダウンロード処理で明示的に Proxy を指定 | Agent 設定の適用前に確認する |
+| ISO・OS 更新の取得（①の構築中） | 各 VM の専用 Public IP から直接接続 | 初期 NSG の Internet Outbound Allow |
+| Arc インストーラー取得（③） | ダウンロード処理で明示的に Proxy を指定 | Restricted を維持して、Agent 設定の適用前に確認する |
 | 講師の VM 操作 | 管理端末 → hub Bastion → 各 Azure VM | 端末から HTTPS / 443、Bastion から Private IP の RDP / 3389 |
 
-必要な公開通信の出口を明示 Proxy に限定し、Arc Agent 固有の設定で通信させます。既存オンプレミスの既定経路と OS 全体の Proxy 設定は維持してください。Firewall への転送は Agent の Proxy 指定で行います。
+②③では、Arc の必要な公開通信の出口を明示 Proxy に限定し、Arc Agent 固有の設定で通信させます。既存オンプレミスの既定経路と OS 全体の Proxy 設定は維持してください。Firewall への転送は Agent の Proxy 指定で行います。
 
 AzFW の Explicit Proxy は Firewall Policy で有効化します。HTTP の同じ待受ポートが HTTP と HTTPS の要求を受け付け、HTTPS では CONNECT を使用します。Firewall Policy の Application rule で、必要な FQDN と宛先ポートを許可します。待受ポート `3128` と宛先 HTTPS の `443` をそれぞれ設定してください。Agent に Proxy URL を直接指定し、TLS は Agent と接続先の間で終端します。TLS 検査による証明書の置き換えは Agent の接続を失敗させるリスクがあるため、これらの通信には適用しないでください。
 
@@ -57,7 +58,20 @@ Inbound endpoint が配置された hub VNet に zone をリンクします。�
 
 任意ラボでは Azure VM 内に Hyper-V を構成し、その L2 ゲストだけを Arc に登録します。L1 ホストは Azure VM として管理します。L2 は Internal vSwitch と WinNAT を使用し、Azure / Azure Local IMDS への接続を遮断します。この構成は Azure 内の評価用です。本番環境への適用時は、実際のサーバーと接続方式に合わせて設計してください。
 
-講師用の管理接続には hub の `AzureBastionSubnet`（`10.20.3.0/26`）へ Bastion Standard をデプロイします。ブラウザーから3台の Azure VM を操作し、ファイル転送には有効化済みのネイティブ RDP 接続を使います。L2 は L1 の VMConnect / PowerShell Direct を使用してください。Bastion と Firewall はそれぞれ専用 Public IP を持ち、VM は Private IP で管理します。お客様が既存環境で②③を実施する場合は、既存の承認済み管理接続を使用してください。
+講師用の管理接続には hub の `AzureBastionSubnet`（`10.20.3.0/26`）へ Bastion Standard をデプロイします。ブラウザーから3台の Azure VM を操作し、ファイル転送には有効化済みのネイティブ RDP 接続を使います。L2 は L1 の VMConnect / PowerShell Direct を使用してください。Firewall・Bastion・3台の VM が、それぞれ専用 Public IP を持ちます。VM の管理接続は Private IP 経由に統一します。お客様が既存環境で②③を実施する場合は、既存の承認済み管理接続を使用してください。
+
+## ①の構築用通信と②③の演習用通信
+
+| フェーズ | 3台の NIC NSG | 主な作業 |
+|---|---|---|
+| Build | Internet 宛て Allow、Internet からの着信 Deny、RDP は Bastion を許可 | ISO 取得、L2 の無人構築、OS 更新・アクティベーション |
+| Restricted | Internet 宛て Deny、DNS・PE・Proxy・必要な Azure プラットフォーム通信を許可 | ②③で登録・収集と閉域経路を検証 |
+
+①の最後に3台の `LabInternetOutbound` 規則を Allow から Deny に切り替えます。Public IP と NSG は NIC に関連付けたまま維持してください。L2 の通信も L1 の WinNAT を通るため、L1 の NSG で制限されます。Bastion と Azure Firewall 自身には、この VM 用 Internet Deny を適用しません。
+
+NSG が判定するのは VM が送信するパケットの宛先です。Arc Agent が `10.20.0.4:3128` を Proxy に指定した場合、VM の NSG ではプライベート宛ての通信として評価されます。AzFW が Entra ID 等へ接続する処理は Firewall Policy で許可します。直接の公開接続だけを遮断し、Private Endpoint と明示 Proxy の経路を維持してください。
+
+NSG はステートフルです。規則変更後も既存フローが続く場合があるため、構築中の通信を終了し、新しい接続で Restricted の成否を確認します。AMA / VM 拡張機能の初回配布・更新は、ログの稼働通信と分けて検証します。配布用の例外が必要な場合は、実際の宛先、対象 VM、期間を承認し、例外終了後の Restricted 状態で新規ログの到着を判定してください。
 
 ## 最小変更として評価する項目
 
@@ -78,3 +92,4 @@ Inbound endpoint が配置された hub VNet に zone をリンクします。�
 - [AMPLS の設計](https://learn.microsoft.com/azure/azure-monitor/fundamentals/private-link-design)
 - [Bastion と VNet Peering](https://learn.microsoft.com/azure/bastion/vnet-peering)
 - [Bastion のネイティブクライアント](https://learn.microsoft.com/azure/bastion/native-client)
+- [NSG の評価順序とステートフル処理](https://learn.microsoft.com/azure/virtual-network/network-security-groups-overview)

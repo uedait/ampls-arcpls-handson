@@ -108,10 +108,12 @@ DNS の確認後、3-3 以降で Proxy と Agent を設定してください。�
 
 - 許可: 対象サーバー → Windows DNS、Arc PE / AMPLS PE の全対象 IP、AzFW の Proxy 待受ポート。
 - 遮断: 対象サーバーから公開宛先への直接通信。既存の既定経路は維持してください。
-- 任意ラボ: onpre subnet の NSG に、送信元を **L1 ホストの Private IP** に限定した `Internet` 宛ての Outbound Deny を追加します。必要な私用宛先の Allow と優先順位、既存管理経路、Azure プラットフォーム通信への影響を確認してください。DNS VM や VNet 全体への一括遮断は、名前解決と管理接続を停止させるリスクがあるため、実施しないでください。
+- 任意ラボ: ①の最後に適用した、3台それぞれの **NIC NSG** の `LabInternetOutbound=Deny` を維持します。L2 は WinNAT 後に L1 の NIC NSG で評価されます。DNS・PE・Proxy の明示的 Allow、Bastion と Azure プラットフォーム通信を確認してください。共有 VNet 全体の通信を一括遮断すると管理・名前解決へ影響するリスクがあるため、実施しないでください。
 - 実環境: 既存の境界 Firewall 等で対象送信元に適用します。変更記録と復元値を残します。
 
 ルールの反映後、対象サーバーで `Test-NetConnection management.azure.com -Port 443` の直接 TCP が失敗し、Proxy 待受ポートは成功することを確認します。既存の NAT Gateway や別 Proxy、OS / 環境変数の Proxy による迂回がないかも確認してください。
+
+NSG は、VM が実際に送るパケットの宛先を判定します。Proxy 指定時の宛先は AzFW のプライベート IP `10.20.0.4:3128` なので、VM の Internet Deny と併用できます。AzFW から Entra ID / ARM 等への公開通信は Firewall Policy で許可してください。
 
 ## 3-5. Connected Machine agent をインストールする
 

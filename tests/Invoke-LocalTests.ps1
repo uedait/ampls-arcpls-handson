@@ -59,12 +59,54 @@ if ($line.StartsWith('monitor data-collection rule association create ')) {
     $state | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath $statePath
     Return-Json $association
 }
+if ($line.StartsWith('network nsg show ')) {
+    $name = $arguments[[array]::IndexOf($arguments, '--name') + 1]
+    $rule = @{
+        name='LabInternetOutbound'; access=$state.nsgAccess[$name]; priority=400
+        direction='Outbound'; protocol='*'; sourceAddressPrefix='*'; sourcePortRange='*'
+        destinationAddressPrefix='Internet'; destinationPortRange='*'
+    }
+    if ($state.mode -eq 'nsg-priority') { $rule.priority=200 }
+    $rules = @($rule,
+        @{ name='AllowPrivateEndpoints'; access='Allow'; priority=110; direction='Outbound'; protocol='Tcp'; destinationAddressPrefix='10.20.1.0/24'; destinationPortRange='443' },
+        @{ name='AllowExplicitProxy'; access='Allow'; priority=120; direction='Outbound'; protocol='Tcp'; destinationAddressPrefix='10.20.0.4'; destinationPortRange='3128' })
+    if ($state.mode -eq 'nsg-extra-rule') {
+        $rules += @{ name='ExtraPublicAllow'; direction='Outbound'; access='Allow'; priority=300 }
+    }
+    $purpose = if ($state.mode -eq 'nsg-owner') { 'someone-else' } else { 'optional-ampls-arcpls-lab' }
+    Return-Json @{ id="/subscriptions/$($state.subscription)/resourceGroups/test/providers/Microsoft.Network/networkSecurityGroups/$name"; tags=@{purpose=$purpose}; securityRules=$rules }
+}
+if ($line.StartsWith('network nic show ')) {
+    $name = $arguments[[array]::IndexOf($arguments, '--name') + 1]
+    $vm = $name -replace '-nic$', ''
+    $ip = switch ($vm) { 'arclab-workload' {'10.10.1.4'}; 'arclab-dns' {'10.30.1.5'}; 'arclab-hyperv' {'10.30.1.4'} }
+    if ($state.mode -eq 'nsg-nic') { $ip='10.99.0.4' }
+    Return-Json @{
+        networkSecurityGroup=@{id="/subscriptions/$($state.subscription)/resourceGroups/test/providers/Microsoft.Network/networkSecurityGroups/$vm-nsg"}
+        virtualMachine=@{id="/subscriptions/$($state.subscription)/resourceGroups/test/providers/Microsoft.Compute/virtualMachines/$vm"}
+        ipConfigurations=@(@{privateIPAddress=$ip})
+    }
+}
+if ($line.StartsWith('network nsg rule update ')) {
+    $name = $arguments[[array]::IndexOf($arguments, '--nsg-name') + 1]
+    if ($state.mode -eq 'nsg-update-failure' -and $name -eq 'arclab-dns-nsg') {
+        Write-Error 'Synthetic NSG update failure'; exit 7
+    }
+    $state.nsgAccess[$name] = $arguments[[array]::IndexOf($arguments, '--access') + 1]
+    $state | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath $statePath
+    Return-Json @{access=$state.nsgAccess[$name]}
+}
+if ($line.StartsWith('network nsg rule show ')) {
+    $name = $arguments[[array]::IndexOf($arguments, '--nsg-name') + 1]
+    Return-Json @{access=$state.nsgAccess[$name]; direction='Outbound'; destinationAddressPrefix='Internet'; priority=400}
+}
 throw "Unexpected synthetic CLI invocation: $line"
 '@
 function Reset-State([string]$Mode, [object[]]$Associations = @()) {
     @{
         mode = $Mode; tenant = $tenant; subscription = $subscription
         associations = $Associations
+        nsgAccess = @{ 'arclab-workload-nsg'='Allow'; 'arclab-dns-nsg'='Allow'; 'arclab-hyperv-nsg'='Allow' }
         extension = @{
             id = "$target/extensions/AzureMonitorWindowsAgent"
             publisher = 'Microsoft.Azure.Monitor'
@@ -146,6 +188,41 @@ try {
     $null = & $ama @common -ResourceType AzureVm -ResourceGroup test -MachineName test-vm -WhatIf
     Assert-NoWrites
     Write-Output 'PASS: WhatIf prevents AMA mutation.'
+
+    $phase = Join-Path $root 'infra\lab\Set-LabInternetAccess.ps1'
+    Reset-State 'normal'
+    $null = & $phase @common -ResourceGroup test -Mode Restricted -Confirm:$false
+    if (@((Get-TestState).nsgAccess.Values | Where-Object { $_ -ne 'Deny' }).Count -gt 0) { throw 'All three NSGs must deny direct Internet.' }
+    Write-Output 'PASS: Restricted phase applies Internet deny to all three NIC NSGs.'
+    $null = & $phase @common -ResourceGroup test -Mode Build -Confirm:$false
+    if (@((Get-TestState).nsgAccess.Values | Where-Object { $_ -ne 'Allow' }).Count -gt 0) { throw 'Build recovery must restore all three NSGs.' }
+    Write-Output 'PASS: approved Build phase restores Internet allowance.'
+
+    foreach ($case in @(
+        @{Mode='nsg-owner'; Error='owner tag'}
+        @{Mode='nsg-nic'; Error='ownership mismatch'}
+        @{Mode='nsg-priority'; Error='Unexpected LabInternetOutbound'}
+        @{Mode='nsg-extra-rule'; Error='Additional outbound rules'}
+        @{Mode='mismatch'; Error='context mismatch'}
+    )) {
+        Reset-State $case.Mode
+        Assert-Failure { & $phase @common -ResourceGroup test -Mode Restricted -Confirm:$false } $case.Error
+        Assert-NoWrites
+        Write-Output "PASS: $($case.Mode) blocks NSG mutations during preflight."
+    }
+    Reset-State 'nsg-update-failure'
+    Assert-Failure { & $phase @common -ResourceGroup test -Mode Restricted -Confirm:$false } 'Phase change stopped'
+    $state = Get-TestState
+    if ($state.nsgAccess['arclab-workload-nsg'] -ne 'Deny' -or
+        $state.nsgAccess['arclab-dns-nsg'] -ne 'Allow' -or $state.nsgAccess['arclab-hyperv-nsg'] -ne 'Allow') {
+        throw 'Partial NSG failure was not represented accurately.'
+    }
+    Write-Output 'PASS: partial NSG mutation fails explicitly and retains observed per-VM state.'
+
+    Reset-State 'normal'
+    $null = & $phase @common -ResourceGroup test -Mode Restricted -WhatIf
+    Assert-NoWrites
+    Write-Output 'PASS: phase WhatIf leaves NSGs unchanged.'
 } finally {
     $env:PATH = $previousPath
     $env:HANDSON_TEST_STATE_DIR = $previousState

@@ -14,7 +14,7 @@ if (-not (Get-NetIPAddress -AddressFamily IPv4 | Where-Object IPAddress -eq '10.
 }
 Import-Module Hyper-V -ErrorAction Stop
 if ((Get-Service vmms).Status -ne 'Running') { throw 'Install Hyper-V, reboot the host, then retry.' }
-foreach ($file in @('Set-NestedGuest.ps1', 'Test-NestedImds.ps1')) {
+foreach ($file in @('Set-NestedGuest.ps1', 'Test-NestedImds.ps1', 'Initialize-NestedNetwork.ps1')) {
     if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot $file) -PathType Leaf)) {
         throw "Missing companion script: $file"
     }
@@ -37,33 +37,7 @@ if ($existingVm) {
 elseif (Test-Path -LiteralPath $diskPath) {
     throw 'Destination disk exists without the expected VM. Resolve the conflict manually; nothing is overwritten.'
 }
-$switch = Get-VMSwitch -Name $SwitchName -ErrorAction SilentlyContinue
-if ($switch -and $switch.SwitchType -ne 'Internal') { throw 'Existing switch is not Internal. No changes made.' }
-$nat = Get-NetNat -Name $NatName -ErrorAction SilentlyContinue
-if ($nat -and $nat.InternalIPInterfaceAddressPrefix -ne '192.168.100.0/24') {
-    throw 'Existing NAT name has a different prefix.'
-}
-# Multiple WinNAT internal prefixes are not supported by this lab.
-$otherNats = @(Get-NetNat | Where-Object Name -ne $NatName)
-if ($otherNats.Count -gt 0) { throw 'Another WinNAT configuration exists. Resolve it manually before continuing.' }
-$conflictingIps = @(Get-NetIPAddress -AddressFamily IPv4 | Where-Object {
-    $_.IPAddress -like '192.168.100.*' -and $_.InterfaceAlias -ne "vEthernet ($SwitchName)"
-})
-if ($conflictingIps.Count -gt 0) { throw '192.168.100.0/24 overlaps another host interface.' }
-if (-not $switch) { $switch = New-VMSwitch -Name $SwitchName -SwitchType Internal }
-$adapter = Get-NetAdapter -Name "vEthernet ($SwitchName)" -ErrorAction Stop
-$static = @(Get-NetIPAddress -InterfaceIndex $adapter.ifIndex -AddressFamily IPv4 |
-    Where-Object { $_.IPAddress -notlike '169.254.*' })
-if ($static.Count -gt 0 -and ($static.Count -ne 1 -or
-    $static[0].IPAddress -ne '192.168.100.1' -or $static[0].PrefixLength -ne 24)) {
-    throw 'Internal switch has conflicting IPv4 settings. No existing IP will be removed.'
-}
-if ($static.Count -eq 0) {
-    New-NetIPAddress -InterfaceIndex $adapter.ifIndex -IPAddress '192.168.100.1' -PrefixLength 24 | Out-Null
-}
-if (-not $nat) {
-    New-NetNat -Name $NatName -InternalIPInterfaceAddressPrefix '192.168.100.0/24' | Out-Null
-}
+& (Join-Path $PSScriptRoot 'Initialize-NestedNetwork.ps1') -SwitchName $SwitchName -NatName $NatName
 if (-not $existingVm) {
     if (-not (Test-Path -LiteralPath $VmDirectory)) {
         New-Item -ItemType Directory -Path $VmDirectory | Out-Null

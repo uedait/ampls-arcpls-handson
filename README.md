@@ -23,7 +23,7 @@ Set-Location .\ampls-arcpls-handson
 |---|---|---|
 | [事前確認](docs/prerequisites.md) | 権限、入力値、費用、既存 DNS / AMPLS への影響と変更承認 | 全員 |
 | [構成と通信](docs/architecture.md) | 直接接続と Proxy の使い分け、必要な変更 | 全員 |
-| [① 任意の検証環境準備](docs/01-lab.md) | 3 VNet、AzFW、Bastion、Resolver、VM、Nested Hyper-V の構築 | 講師・検証者 |
+| [① 任意の検証環境準備](docs/01-lab.md) | 3 VNet、AzFW、Bastion、Resolver、3 VM の PIP・NSG、ISO からの Nested VM 構築と送信制限 | 講師・検証者 |
 | [② Azure VM の登録](docs/02-azure.md) | LAW、DCE、AMPLS、PE、Private DNS、DCR、AMA | 既存 Azure 環境の担当者 |
 | [③ オンプレミスの登録](docs/03-onpremises.md) | Arc PLS、条件付きフォワーダー、Proxy、Arc、AMA | オンプレミスと Azure の担当者 |
 | [結果の確認](docs/validation.md) | ログ、接続先、否定試験、結果記録 | 全員 |
@@ -50,6 +50,7 @@ Set-Location .\ampls-arcpls-handson
 - 本編では Azure リソースの作成・変更と課金が発生します。予算、通貨、有効期限、削除担当を決め、実施環境の費用見積もりと変更承認を取得してください。
 - 初回導入ファイルの取得、稼働中の Agent 通信、更新時の通信を別々に確認してください。インストーラーの取得にはダウンロード処理の Proxy 指定、導入後の Arc 通信には Agent 固有の Proxy 設定を使用します。
 - ①の講師用ラボでは hub の Azure Bastion Standard から各 Azure VM を操作します。L2 は L1 の VMConnect / PowerShell Direct 経由で操作してください。Bastion と専用 Public IP の費用も予算に含めます。
+- ①の構築中は3台それぞれの PIP で外向き通信を行い、[公式 ISO から L2 を自動構築](docs/iso-build.md)します。①の最後に各 NIC の NSG を Restricted に切り替え、②③は直接の Internet 通信を遮断した状態で実施します。PIP は関連付けたまま維持し、NSG で通信を制御してください。
 
 ## 資料とスクリプトを編集する場合
 

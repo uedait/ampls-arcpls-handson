@@ -50,6 +50,7 @@ AMPLS 自体の location はグローバルです。DCE の設定取得先は監
 - Windows サーバー: 64-bit Windows PowerShell 5.1。スクリプトごとの `#Requires` に従う。
 - ソースを取得した管理端末とサーバー間に、承認されたファイル転送・管理接続があること。
 - ①の講師用ラボでは、hub に作成する Bastion Standard への HTTPS 接続と、VM / NIC / Bastion / 対象 VNet の Reader 権限を準備すること。VM 操作用のローカル管理者資格情報と、ファイル転送用の Windows 管理端末・Azure CLI 2.62.0 以降を用意すること。
+- ①の L2 用に公式 Windows Server 2022 ISO の利用条件、HTTPS 取得 URL と公開元の SHA-256 を確認すること。ISO からの展開と無人セットアップは[専用ガイド](iso-build.md)に従い、構築中に必要な OS 更新・アクティベーションを確認すること。
 - PowerShell の実行ポリシーとコード署名の社内ルールを確認すること。署名が必要な場合は承認済みの署名手続きを行うこと。実行ポリシーや証明書検証の無効化は、改ざんされたスクリプトを実行するリスクがあるため、実施しないでください。
 - Arc と AMA の現行サポート対象 OS、TLS、署名検証、時刻同期を確認すること。
 - 利用するリソースプロバイダーの登録状況を Portal の「サブスクリプション → リソース プロバイダー」で確認すること。主に `Microsoft.Network`、`Microsoft.Compute`、`Microsoft.OperationalInsights`、`Microsoft.Insights`、`Microsoft.HybridCompute`、`Microsoft.GuestConfiguration` を使用する。登録には別途権限が必要。
@@ -87,7 +88,7 @@ CLI の補助操作には `connectedmachine` と、DCE 関連付けを CLI で�
 
 NSG やオンプレミス Firewall の変更は対象サーバーに限定します。共有 Firewall の停止や既存サーバーの公開通信の一括遮断は、業務通信を停止させるリスクがあるため、否定試験で実施しないでください。
 
-LAW の取り込み量と保持、PE、Resolver、Firewall、VM・ディスクなどに費用が発生します。①では Bastion Standard と専用 Public IP の費用も含めてください。Windows Event は Application の検証用イベントだけに絞ってください。Security ログや全イベントの収集は、機密情報の取り込みや費用増加につながるため、本ハンズオンでは追加しないでください。Azure Budget の通知を受け取る担当者と、停止・削除を実施する担当者を決めます。①の VM を停止しても Bastion、Firewall、Resolver、PE 等の課金は残るため、終了時には対象を確認して削除してください。
+LAW の取り込み量と保持、PE、Resolver、Firewall、VM・ディスクなどに費用が発生します。①では Bastion Standard、計5個の Public IP、ISO と親・差分 VHDX のディスク容量も含めてください。Windows Event は Application の検証用イベントだけに絞ってください。Security ログや全イベントの収集は、機密情報の取り込みや費用増加につながるため、本ハンズオンでは追加しないでください。Azure Budget の通知を受け取る担当者と、停止・削除を実施する担当者を決めます。①の VM を停止しても Bastion、Firewall、Resolver、PE 等の課金は残るため、終了時には対象を確認して削除してください。
 
 ## 6. 実行前の確認
 

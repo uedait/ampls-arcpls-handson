@@ -246,3 +246,6 @@ output vmNames array = [for machine in machines: '${prefix}-${machine.role}']
 output privateEndpointSubnetId string = hub.properties.subnets[1].id
 output bastionName string = bastion.name
 output bastionResourceId string = bastion.id
+output vmNetworkSecurityGroups array = [for machine in machines: '${prefix}-${machine.role}-nsg']
+output vmPublicIpNames array = [for machine in machines: '${prefix}-${machine.role}-pip']
+output internetAccessPhase string = 'Build: run Set-LabInternetAccess.ps1 -Mode Restricted after guest preparation.'

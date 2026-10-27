@@ -10,6 +10,15 @@ $files = @(Get-ChildItem -LiteralPath $root -Recurse -File |
 $failures = [Collections.Generic.List[string]]::new()
 $scriptCount = 0
 $linkCount = 0
+$fencedCodePattern = '(?ms)^[ \t]*(`{3,}|~{3,})[^\r\n]*\r?\n.*?^[ \t]*\1[ \t]*\r?$'
+foreach ($newline in @("`n", "`r`n")) {
+    $sample = @('```powershell', '[uri](Read-Host)', '```', '[guide](docs/iso-build.md)') -join $newline
+    $sampleContent = [regex]::Replace($sample, $fencedCodePattern, '')
+    $sampleLinks = [regex]::Matches($sampleContent, '\]\(([^)\r\n]+)\)')
+    if ($sampleLinks.Count -ne 1 -or $sampleLinks[0].Groups[1].Value -ne 'docs/iso-build.md') {
+        throw 'Markdown fence/link regression check failed.'
+    }
+}
 foreach ($file in $files) {
     if ($file.Extension -eq '.ps1') {
         $tokens = $null
@@ -25,7 +34,8 @@ foreach ($file in $files) {
     }
     if ($file.Extension -eq '.md') {
         $markdown = Get-Content -LiteralPath $file.FullName -Raw
-        foreach ($match in [regex]::Matches($markdown, '\]\(([^)\r\n]+)\)')) {
+        $linkContent = [regex]::Replace($markdown, $fencedCodePattern, '')
+        foreach ($match in [regex]::Matches($linkContent, '\]\(([^)\r\n]+)\)')) {
             $target = $match.Groups[1].Value.Trim('<', '>')
             if ($target -match '^[a-zA-Z][a-zA-Z0-9+.-]*:|^#') { continue }
             $relative = [uri]::UnescapeDataString(($target -split '#', 2)[0])

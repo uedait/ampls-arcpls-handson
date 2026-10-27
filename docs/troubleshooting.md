@@ -10,6 +10,11 @@
 | Bastion から Azure VM に接続できない | Bastion のデプロイ状態、hub との peering、Reader 権限、VM の RDP 設定、NSG / Windows Firewall | AzureBastionSubnet `10.20.3.0/26` から対象 Private IP の TCP 3389 を確認する |
 | Bastion のファイル転送に失敗する | Standard SKU、Native Client Support、Windows 管理端末、MSTSC の転送ポリシー、空き容量 | ネイティブ RDP 接続で転送し、転送元・先のハッシュを照合する |
 | L2 の画面を開けない | L1 の Bastion 接続、Hyper-V / VMMS、L2 の起動状態 | L1 内の Hyper-V Manager / VMConnect で L2 を開く。PowerShell Direct は L2 のローカル資格情報を使う |
+| ISO の取得・ハッシュ検証で失敗 | L1 の Build フェーズ、公式 HTTPS URL、リダイレクト先、公開元の SHA-256、空き容量 | 配布元と承認した入力を照合する。ハッシュ不一致の ISO は使用を停止する |
+| L2 の無人セットアップが完了しない | ISO のバージョン / WIM エディション、Gen2 起動、応答ファイル、PowerShell Direct の待機期限 | L1 の VMConnect で実際の画面を確認し、資格情報を含む応答ファイルとディスクを保護して原因を調査する |
+| PIP があるのに公開宛先へ接続できない | NIC NSG の `LabInternetOutbound` と有効な規則、新規 TCP 接続 | Restricted では意図した結果。構築作業が必要なら承認を得て Build へ戻す |
+| Proxy も NSG で遮断されたように見える | 宛先が AzFW の Private IP / 3128 か、`AllowExplicitProxy` と優先度、FW の待受状態 | VM→Private Proxy の到達性と FW→公開宛先の Application rule を個別に確認する |
+| 制限後も以前の公開接続だけ続く | 接続開始時刻と既存フロー、NSG のステートフル処理 | 構築中の通信を終了し、新しい接続で Deny を検証する |
 | PE が Pending | 接続承認の状態と対象 resource ID | リソース所有者に承認依頼 |
 | DNS が公開 IP を返す | 対象サーバーの DNS、7公開ドメインの転送先、hub link、PE の zone group | Windows DNS 経由と Inbound 直接の結果を、承認範囲で比較 |
 | DNS が NXDOMAIN | 実 FQDN、必要な A レコード、空の zone、既存 zone の上書き | 変更前の応答と照合し、既存業務への影響があれば直ちに切り戻す |

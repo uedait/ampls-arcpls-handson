@@ -44,16 +44,43 @@ else {
         }
         foreach ($deployment in @($template.resources | Where-Object type -eq 'Microsoft.Resources/deployments')) {
             $guestResources = $deployment.properties.template.resources
+            $vmPips = @($guestResources | Where-Object type -eq 'Microsoft.Network/publicIPAddresses')
+            $vmNsgs = @($guestResources | Where-Object type -eq 'Microsoft.Network/networkSecurityGroups')
+            if ($vmPips.Count -ne 1 -or $vmPips[0].sku.name -ne 'Standard' -or
+                $vmPips[0].properties.publicIPAllocationMethod -ne 'Static' -or $vmNsgs.Count -ne 1) {
+                $failures.Add('Each VM module must create a dedicated Standard static Public IP and NSG.')
+                continue
+            }
+            $rules = @($vmNsgs[0].properties.securityRules)
+            $expected = @{
+                AllowBastionRdp = @{ priority=100; direction='Inbound'; access='Allow'; protocol='Tcp'; sourceAddressPrefix='10.20.3.0/26'; destinationPortRange='3389' }
+                DenyOtherRdp = @{ priority=150; direction='Inbound'; access='Deny'; sourceAddressPrefix='*'; destinationPortRange='3389' }
+                DenyInternetInbound = @{ priority=200; direction='Inbound'; access='Deny'; sourceAddressPrefix='Internet'; destinationPortRange='*' }
+                AllowPrivateEndpoints = @{ priority=110; direction='Outbound'; access='Allow'; destinationAddressPrefix='10.20.1.0/24'; destinationPortRange='443' }
+                AllowExplicitProxy = @{ priority=120; direction='Outbound'; access='Allow'; destinationAddressPrefix='10.20.0.4'; destinationPortRange='3128' }
+                LabInternetOutbound = @{ priority=400; direction='Outbound'; access='Allow'; destinationAddressPrefix='Internet'; destinationPortRange='*' }
+            }
+            foreach ($name in $expected.Keys) {
+                $found = @($rules | Where-Object name -eq $name)
+                foreach ($key in $expected[$name].Keys) {
+                    if ($found.Count -ne 1 -or $found[0].properties.$key -ne $expected[$name][$key]) {
+                        $failures.Add("Unexpected $key on NSG rule $name.")
+                    }
+                }
+            }
             foreach ($nic in @($guestResources | Where-Object type -eq 'Microsoft.Network/networkInterfaces')) {
+                if (-not $nic.properties.networkSecurityGroup.id) {
+                    $failures.Add('VM NIC must reference its dedicated NSG.')
+                }
                 foreach ($configuration in $nic.properties.ipConfigurations) {
-                    if ($configuration.properties.PSObject.Properties.Name -contains 'publicIPAddress') {
-                        $failures.Add('VM NICs must use private IPs only; management must use Bastion.')
+                    if (-not $configuration.properties.publicIPAddress.id) {
+                        $failures.Add('VM NIC must reference its dedicated Public IP for build-time outbound.')
                     }
                 }
             }
         }
         if ($failures.Count -eq $bastionFailureCount) {
-            Write-Output 'PASS: hub Bastion Standard, native client support, dedicated /26 subnet, separate Public IPs and private-only VM NICs.'
+            Write-Output 'PASS: hub Bastion Standard, native client support, each VM Public IP/NSG, Bastion-only RDP and explicit outbound phase rule.'
         }
     }
     & $bicep.Source build-params (Join-Path $PSScriptRoot 'example.bicepparam') --stdout | Out-Null
