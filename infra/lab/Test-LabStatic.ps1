@@ -44,6 +44,11 @@ else {
         }
         foreach ($deployment in @($template.resources | Where-Object type -eq 'Microsoft.Resources/deployments')) {
             $guestResources = $deployment.properties.template.resources
+            $guestVms = @($guestResources | Where-Object type -eq 'Microsoft.Compute/virtualMachines')
+            if ($guestVms.Count -ne 1 -or $guestVms[0].apiVersion -ne '2025-11-01' -or
+                $guestVms[0].properties.securityProfile.securityType -ne 'Standard') {
+                $failures.Add('Expected Standard VM security with the supported 2025-11-01 VM API.')
+            }
             $vmPips = @($guestResources | Where-Object type -eq 'Microsoft.Network/publicIPAddresses')
             $vmNsgs = @($guestResources | Where-Object type -eq 'Microsoft.Network/networkSecurityGroups')
             if ($vmPips.Count -ne 1 -or $vmPips[0].sku.name -ne 'Standard' -or

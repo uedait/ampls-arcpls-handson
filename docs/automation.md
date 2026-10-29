@@ -26,6 +26,8 @@ L2 は既定の Microsoft 公式 Windows Server 2022 x64 英語評価版 ISO を
 
 VM の配置先に可用性ゾーンは指定しません。VM サイズの利用制限は種類を区別し、ゾーン限定の制限だけであれば構築を続行します。リージョン全体の制限や種類を判別できない制限が含まれる場合は停止します。Gen2 の対応も確認します。この事前確認は、デプロイ時に必要な容量を確保できることを保証しません。
 
+VM の `securityType` は `Standard` を明示し、Microsoft.Compute の VM API `2025-11-01` を使用します。サブスクリプション全体の機能登録を自動的に変更することはありません。
+
 Azure VM の IMDS 通信はプラットフォームの既定動作を維持し、NSG に `AzurePlatformIMDS` タグの規則を追加しません。L2 からの IMDS 接続だけを L2 内の Windows Firewall で遮断します。
 
 1. GitHub の ref を完全なコミット SHA に解決し、同じコミットの ZIP を管理端末に取得します。展開したコミット内の Bicep とゲストスクリプトを使用します。
@@ -55,9 +57,23 @@ Azure の管理者パスワードは secure パラメーターとして ARM の�
 
 自動削除・既存リソースの上書き・未確認の状態を使った継続は行いません。再実行時は保存した今回の状態と Azure・ゲストの実状態を確認して、復旧または別の専用 RG での構築を承認してください。構築失敗時もリソースの課金と、Build 状態の外向き通信が残ることを確認します。
 
+### 承認した既存リソースを使う復旧
+
+通常の `Deploy-Lab.ps1` は、新規または空の専用 RG だけを使用します。リソース作成段階の失敗を同じ RG で復旧する場合は、既存リソースを再利用する対象と影響について別途承認を得て、保存した復旧用スクリプトから `Invoke-LabAutomation` の `Recovery` 引数へ次の情報を渡します。
+
+- `PreviousRunDirectory`: 元の `state.json` と `approval.json` がある実行ディレクトリの絶対パス。
+- `ApprovedResourceIds`: 再利用を承認した既存リソースの完全な ID の配列。
+
+元の実行は `DeployResources` で `Failed` になっている必要があります。元の実行記録と承認記録の Run ID、コミット、対象 RG、テナント、サブスクリプション、接頭辞、リージョン、取得元を照合します。新しい実行 ID を使い、元の実行記録と保存済み資格情報を上書きしません。復旧用スクリプトは、元の資格情報を復号して同じ値を使用します。
+
+指定した ID はすべて対象 RG 配下であることを要求します。実際のリソース ID 一覧が承認した一覧と完全に一致する場合だけ、同じ構成を Incremental モードで再デプロイします。追加、欠落、重複、別 RG の ID、元の失敗記録との不一致があれば変更前に停止します。既存リソースのある RG に対し、`Recovery` を指定せずに構築を続けることはありません。
+
+復旧前に親デプロイの終了を確認します。ゲスト設定段階の失敗からの再開、自動的な対象追加、自動削除はこの復旧経路に含めません。
+
 ## 根拠
 
 - [Managed Run Command](https://learn.microsoft.com/azure/virtual-machines/windows/run-command-managed)
 - [Run Command の REST API](https://learn.microsoft.com/rest/api/compute/virtual-machine-run-commands/create-or-update?view=rest-compute-2024-07-01)
 - [GitHub の ZIP アーカイブ API](https://docs.github.com/rest/repos/contents#download-a-repository-archive-zip)
 - [Windows Server 2022 評価版](https://www.microsoft.com/en-us/evalcenter/download-windows-server-2022)
+- [Standard セキュリティを明示する場合の API](https://learn.microsoft.com/azure/virtual-machines/trusted-launch-faq#can-i-disable-trusted-launch-for-a-new-vm-deployment)

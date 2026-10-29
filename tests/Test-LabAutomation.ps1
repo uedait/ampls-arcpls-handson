@@ -138,6 +138,9 @@ try {
     $script:authenticationType = 'user'
     $script:skuRestrictions = @()
     $script:skuGen2 = $true
+    $script:groupExists = $false
+    $script:existingResources = @()
+    $script:deploymentState = 'Failed'
     function Save-LabRunState {
         param($Context, $Stage, $Status, $Detail=@{})
         $script:events.Add("$Stage/$Status")
@@ -154,7 +157,12 @@ try {
             $generations = if ($script:skuGen2) { 'V1,V2' } else { 'V1' }
             return @(@{name=$size; resourceType='virtualMachines'; restrictions=$script:skuRestrictions; capabilities=@(@{name='HyperVGenerations';value=$generations})})
         }
-        if ($line -like 'group list*') { return @() }
+        if ($line -like 'group list*') {
+            if ($script:groupExists) { return @(@{name='rg-test'}) }
+            return @()
+        }
+        if ($line -like 'resource list*') { return @($script:existingResources) }
+        if ($line -like 'deployment group list*') { return @(@{properties=@{provisioningState=$script:deploymentState}}) }
         if ($line -like 'group create*') { $script:events.Add('GroupCreated'); return @{name='rg-test'} }
         if ($line -like 'bicep build*') { return @{resources=@()} }
         if ($line -like 'network nic update*') { $script:events.Add('NicDns'); return @{name='nic'} }
@@ -218,6 +226,74 @@ try {
     Assert-Test (-not $script:events.Contains('GroupCreated')) 'Gen2 remains mandatory before resource creation.'
     $script:skuGen2 = $true
 
+    $previousDirectory = Join-Path $temporary 'failed-run'
+    $null = New-Item -ItemType Directory -Path $previousDirectory
+    $previousRecord = @{
+        RunId=('d' * 32); Stage='DeployResources'; Status='Failed'; CommitSha=('e' * 40)
+        TenantId=$context.TenantId; SubscriptionId=$context.SubscriptionId
+        ResourceGroup=$context.ResourceGroup; Prefix=$context.Prefix
+    }
+    $previousApproval = @{
+        RunId=$previousRecord.RunId; SourceCommit=$previousRecord.CommitSha
+        ResourceGroup=$context.ResourceGroup; Prefix=$context.Prefix
+        Location=$context.Location; Repository=$context.Repository
+    }
+    $previousStatePath = Join-Path $previousDirectory 'state.json'
+    $previousRecord | ConvertTo-Json | Set-Content -LiteralPath $previousStatePath
+    $previousApproval | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $previousDirectory 'approval.json')
+    $approvedId = "/subscriptions/$($context.SubscriptionId)/resourceGroups/rg-test/providers/Microsoft.Network/virtualNetworks/labtest-hub"
+    $recovery = @{PreviousRunDirectory=$previousDirectory; ApprovedResourceIds=@($approvedId)}
+    $script:groupExists = $true
+    $script:existingResources = @(@{id=$approvedId})
+    $script:events.Clear()
+    Assert-Throws { Invoke-LabAutomation $context } 'Lab deployment stopped at ValidateInputs'
+    Assert-Test (-not $script:events.Contains('DeployResources/Running')) 'Default execution still rejects a non-empty resource group.'
+    $script:events.Clear()
+    $result = Invoke-LabAutomation -Context $context -Recovery $recovery
+    Assert-Test ($result.Status -eq 'Succeeded' -and -not $script:events.Contains('GroupCreated')) 'Explicit recovery reuses only the approved existing resource group.'
+    foreach ($case in @(
+        @{Resources=@()},
+        @{Resources=@(@{id=$approvedId}, @{id=($approvedId + '-extra')})},
+        @{Resources=@(@{id=($approvedId + '-other')})}
+    )) {
+        $script:existingResources = $case.Resources
+        $script:events.Clear()
+        Assert-Throws { Invoke-LabAutomation -Context $context -Recovery $recovery } 'Lab deployment stopped at ValidateInputs'
+        Assert-Test (-not $script:events.Contains('DeployResources/Running')) 'Missing, additional and different resources prevent recovery writes.'
+    }
+    $script:existingResources = @(@{id=$approvedId})
+    $script:deploymentState = 'Running'
+    $script:events.Clear()
+    Assert-Throws { Invoke-LabAutomation -Context $context -Recovery $recovery } 'Lab deployment stopped at ValidateInputs'
+    Assert-Test (-not $script:events.Contains('DeployResources/Running')) 'Active deployments prevent recovery writes.'
+    $script:deploymentState = 'Failed'
+    $invalidRecovery = $recovery.Clone()
+    $invalidRecovery.ApprovedResourceIds = @($approvedId, $approvedId)
+    Assert-Throws { Invoke-LabAutomation -Context $context -Recovery $invalidRecovery } 'unique approved resource IDs'
+    $invalidRecovery.ApprovedResourceIds = @($approvedId.Replace('/rg-test/', '/other/'))
+    Assert-Throws { Invoke-LabAutomation -Context $context -Recovery $invalidRecovery } 'outside the target resource group'
+    Assert-Throws { Invoke-LabAutomation -Context $context -Recovery @{} } 'Recovery requires'
+    $invalidRecord = $previousRecord.Clone()
+    $invalidRecord.Status = 'Succeeded'
+    $invalidRecord | ConvertTo-Json | Set-Content -LiteralPath $previousStatePath
+    Assert-Throws { Invoke-LabAutomation -Context $context -Recovery $recovery } 'matching failed resource deployment'
+    $invalidRecord = $previousRecord.Clone()
+    $invalidRecord.ResourceGroup = 'other'
+    $invalidRecord | ConvertTo-Json | Set-Content -LiteralPath $previousStatePath
+    Assert-Throws { Invoke-LabAutomation -Context $context -Recovery $recovery } 'Previous run context'
+    $previousRecord | ConvertTo-Json | Set-Content -LiteralPath $previousStatePath
+    $originalRunDirectory = $context.RunDirectory
+    $context.RunDirectory = $previousDirectory
+    $originalRecordText = Get-Content -LiteralPath $previousStatePath -Raw
+    Assert-Throws { Invoke-LabAutomation -Context $context -Recovery $recovery } 'must not overwrite'
+    Assert-Test ((Get-Content -LiteralPath $previousStatePath -Raw) -eq $originalRecordText) 'Invalid recovery cannot overwrite the previous state record.'
+    $context.RunDirectory = $originalRunDirectory
+    $script:groupExists = $false
+    $script:events.Clear()
+    Assert-Throws { Invoke-LabAutomation -Context $context -Recovery $recovery } 'Lab deployment stopped at ValidateInputs'
+    Assert-Test (-not $script:events.Contains('GroupCreated')) 'Recovery never creates a missing resource group.'
+    $script:existingResources = @()
+
     $previousConfigDir = $env:AZURE_CONFIG_DIR
     try {
         $env:AZURE_CONFIG_DIR = $temporary
@@ -226,6 +302,12 @@ try {
         $script:authenticationType = 'servicePrincipal'
         $result = Invoke-LabAutomation $context
         Assert-Test ($result.Status -eq 'Succeeded') 'Service principal context completes the same controller phases.'
+        $script:groupExists = $true
+        $script:existingResources = @(@{id=$approvedId})
+        $result = Invoke-LabAutomation -Context $context -Recovery $recovery
+        Assert-Test ($result.Status -eq 'Succeeded') 'Service principal recovery uses the approved identity and exact existing resource list.'
+        $script:groupExists = $false
+        $script:existingResources = @()
 
         $legacy = Join-Path $temporary 'legacy'
         $null = New-Item -ItemType Directory -Path (Join-Path $legacy 'infra\lab') -Force
@@ -281,11 +363,11 @@ param(
     Write-Output "PASS: $checks controller, result-contract, archive and failure-order assertions."
 } finally {
     $password.Dispose()
-    foreach ($file in @('state.json','fixture.zip','good\root\readme.txt','legacy\infra\lab\Set-LabInternetAccess.ps1','legacy\infra\lab\observed.json')) {
+    foreach ($file in @('state.json','fixture.zip','good\root\readme.txt','legacy\infra\lab\Set-LabInternetAccess.ps1','legacy\infra\lab\observed.json','failed-run\state.json','failed-run\approval.json')) {
         $path = Join-Path $temporary $file
         if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
     }
-    foreach ($directory in @('good\root','good','legacy\infra\lab','legacy\infra','legacy')) {
+    foreach ($directory in @('good\root','good','legacy\infra\lab','legacy\infra','legacy','failed-run')) {
         $path = Join-Path $temporary $directory
         if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path }
     }

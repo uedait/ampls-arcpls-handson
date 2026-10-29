@@ -329,8 +329,49 @@ function Get-LabDeploymentTemplate {
     }
 }
 
+function Assert-LabRecoveryContext {
+    param([hashtable]$Context, [hashtable]$Recovery)
+    if (-not $Recovery.ContainsKey('PreviousRunDirectory') -or
+        -not [IO.Path]::IsPathFullyQualified($Recovery.PreviousRunDirectory) -or
+        -not $Recovery.ContainsKey('ApprovedResourceIds')) {
+        throw 'Recovery requires an absolute previous run directory and approved resource IDs.'
+    }
+    if ([IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($Recovery.PreviousRunDirectory)) -eq
+        [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($Context.RunDirectory))) {
+        throw 'Recovery must not overwrite the previous run directory.'
+    }
+    $previous = Get-Content -LiteralPath (Join-Path $Recovery.PreviousRunDirectory 'state.json') -Raw |
+        ConvertFrom-Json -AsHashtable
+    $approval = Get-Content -LiteralPath (Join-Path $Recovery.PreviousRunDirectory 'approval.json') -Raw |
+        ConvertFrom-Json -AsHashtable
+    if ($previous['Stage'] -ne 'DeployResources' -or $previous['Status'] -ne 'Failed' -or
+        $previous['RunId'] -notmatch '^[a-f0-9]{32}$' -or $previous.RunId -eq $Context.RunId -or
+        $approval['RunId'] -ne $previous.RunId -or $approval['SourceCommit'] -ne $previous['CommitSha'] -or
+        $previous['CommitSha'] -notmatch '^[a-f0-9]{40}$') {
+        throw 'Recovery requires a matching failed resource deployment record from a different run.'
+    }
+    foreach ($key in 'TenantId','SubscriptionId','ResourceGroup','Prefix') {
+        if ($previous[$key] -ne $Context[$key]) { throw 'Previous run context does not match the approved recovery target.' }
+    }
+    foreach ($key in 'ResourceGroup','Prefix','Location','Repository') {
+        if ($approval[$key] -ne $Context[$key]) { throw 'Previous approval does not match the approved recovery target.' }
+    }
+    $approvedIds = @($Recovery.ApprovedResourceIds)
+    $scope = "/subscriptions/$($Context.SubscriptionId)/resourceGroups/$($Context.ResourceGroup)/providers/"
+    if ($approvedIds.Count -eq 0 -or @($approvedIds | Sort-Object -Unique).Count -ne $approvedIds.Count) {
+        throw 'Recovery requires a non-empty list of unique approved resource IDs.'
+    }
+    foreach ($id in $approvedIds) {
+        if ($id -isnot [string] -or -not $id.StartsWith($scope, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'An approved recovery resource ID is outside the target resource group.'
+        }
+    }
+}
+
 function Invoke-LabAutomation {
-    param([hashtable]$Context)
+    param([hashtable]$Context, [hashtable]$Recovery)
+    $recovering = $PSBoundParameters.ContainsKey('Recovery') -and $null -ne $Recovery
+    if ($recovering) { Assert-LabRecoveryContext -Context $Context -Recovery $Recovery }
     $stage = 'ValidateInputs'
     try {
         Save-LabRunState $Context $stage 'Running'
@@ -357,8 +398,23 @@ function Invoke-LabAutomation {
         $groups = @(Invoke-HandsonAz -Arguments (@('group', 'list') + $subscription) -ExpectedContext $Context.AzureContext)
         if (@($groups | Where-Object { $_.name -eq $Context.ResourceGroup }).Count -gt 0) {
             $existing = @(Invoke-HandsonAz -Arguments (@('resource', 'list', '--resource-group', $Context.ResourceGroup) + $subscription) -ExpectedContext $Context.AzureContext)
-            if ($existing.Count -gt 0) { throw 'Use a new or empty lab resource group; automatic resume over resources is not supported.' }
+            if ($recovering) {
+                $deployments = @(Invoke-HandsonAz -Arguments (@('deployment', 'group', 'list',
+                    '--resource-group', $Context.ResourceGroup) + $subscription) -ExpectedContext $Context.AzureContext)
+                if (@($deployments | Where-Object { $_.properties.provisioningState -notin 'Succeeded','Failed','Canceled' }).Count -gt 0) {
+                    throw 'A deployment is still active. Recovery did not change any resources.'
+                }
+                $actualIds = @($existing | ForEach-Object { $_.id } | Sort-Object)
+                $approvedIds = @($Recovery.ApprovedResourceIds | Sort-Object)
+                if ($actualIds.Count -ne $approvedIds.Count -or
+                    @(Compare-Object $actualIds $approvedIds).Count -gt 0) {
+                    throw 'Existing resources do not exactly match the approved recovery resource IDs.'
+                }
+            } elseif ($existing.Count -gt 0) {
+                throw 'Use a new or empty lab resource group; automatic resume over resources is not supported.'
+            }
         } else {
+            if ($recovering) { throw 'The approved recovery resource group is missing. No resource group was created.' }
             $null = Invoke-HandsonAz -Arguments (@('group', 'create', '--name', $Context.ResourceGroup, '--location', $Context.Location) + $subscription) -ExpectedContext $Context.AzureContext
         }
         $stage = 'DeployResources'
