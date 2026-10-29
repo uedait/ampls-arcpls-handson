@@ -171,6 +171,7 @@ try {
     function Invoke-LabArm {
         param($Context, $Method, $Path, $Body)
         if ($Method -eq 'PUT' -and $Path -like '*deployments/optional-lab*') {
+            $script:events.Add('ResourceDeploymentRequested')
             $script:deploymentBody = $Body
             return @{}
         }
@@ -276,7 +277,7 @@ try {
     $invalidRecord = $previousRecord.Clone()
     $invalidRecord.Status = 'Succeeded'
     $invalidRecord | ConvertTo-Json | Set-Content -LiteralPath $previousStatePath
-    Assert-Throws { Invoke-LabAutomation -Context $context -Recovery $recovery } 'matching failed resource deployment'
+    Assert-Throws { Invoke-LabAutomation -Context $context -Recovery $recovery } 'matching failed run record'
     $invalidRecord = $previousRecord.Clone()
     $invalidRecord.ResourceGroup = 'other'
     $invalidRecord | ConvertTo-Json | Set-Content -LiteralPath $previousStatePath
@@ -292,6 +293,46 @@ try {
     $script:events.Clear()
     Assert-Throws { Invoke-LabAutomation -Context $context -Recovery $recovery } 'Lab deployment stopped at ValidateInputs'
     Assert-Test (-not $script:events.Contains('GroupCreated')) 'Recovery never creates a missing resource group.'
+    $dnsRecord = $previousRecord.Clone()
+    $dnsRecord.Stage = 'InitializeDns'
+    $dnsRecord.Detail = @{CurrentRole='dns'; LastRunCommand='lab-dddddddd-initializedns-123abc'}
+    $dnsRecord | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $previousStatePath
+    $dnsRecovery = $recovery.Clone()
+    $dnsRecovery.ResumeFrom = 'InitializeDns'
+    $vmIds = @('dns','workload','hyperv' | ForEach-Object {
+        "/subscriptions/$($context.SubscriptionId)/resourceGroups/rg-test/providers/Microsoft.Compute/virtualMachines/labtest-$_"
+    })
+    $dnsRecovery.ApprovedResourceIds = @($approvedId) + $vmIds
+    $script:groupExists = $true
+    $script:existingResources = @($dnsRecovery.ApprovedResourceIds | ForEach-Object { @{id=$_} })
+    $script:skuRestrictions = @(@{type='Location'})
+    $script:events.Clear()
+    $result = Invoke-LabAutomation -Context $context -Recovery $dnsRecovery
+    Assert-Test ($result.Status -eq 'Succeeded' -and $script:events.Contains('hyperv/BuildNested') -and
+        $script:events.Contains('RestrictionApplied')) 'DNS recovery completes the remaining guest configuration and restriction stages.'
+    Assert-Test (-not $script:events.Contains('ResourceDeploymentRequested') -and
+        -not $script:events.Contains('DeployResources/Running')) 'DNS recovery never redeploys VM or network resources and does not require new VM capacity.'
+    $script:skuRestrictions = @()
+    $invalidDnsRecord = $dnsRecord.Clone()
+    $invalidDnsRecord.Detail = @{CurrentRole='workload'; LastRunCommand='lab-dddddddd-initializedns-123abc'}
+    $invalidDnsRecord | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $previousStatePath
+    Assert-Throws { Invoke-LabAutomation -Context $context -Recovery $dnsRecovery } 'matching failed DNS role'
+    $invalidDnsRecord.Detail = @{CurrentRole='dns'; LastRunCommand='lab-aaaaaaaa-initializedns-123abc'}
+    $invalidDnsRecord | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $previousStatePath
+    Assert-Throws { Invoke-LabAutomation -Context $context -Recovery $dnsRecovery } 'matching failed DNS role'
+    $dnsRecord | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $previousStatePath
+    $missingVmRecovery = $dnsRecovery.Clone()
+    $missingVmRecovery.ApprovedResourceIds = @($approvedId) + $vmIds[0,1]
+    Assert-Throws { Invoke-LabAutomation -Context $context -Recovery $missingVmRecovery } 'all three approved lab VM IDs'
+    $unknownStageRecovery = $dnsRecovery.Clone()
+    $unknownStageRecovery.ResumeFrom = 'PrepareHyperV'
+    Assert-Throws { Invoke-LabAutomation -Context $context -Recovery $unknownStageRecovery } 'stage is not supported'
+    $script:existingResources = @(@{id=$approvedId})
+    $script:events.Clear()
+    Assert-Throws { Invoke-LabAutomation -Context $context -Recovery $dnsRecovery } 'Lab deployment stopped at ValidateInputs'
+    Assert-Test (-not $script:events.Contains('StageSource/Running')) 'DNS recovery rejects changed resource inventories before guest operations.'
+    $previousRecord | ConvertTo-Json | Set-Content -LiteralPath $previousStatePath
+    $script:groupExists = $false
     $script:existingResources = @()
 
     $previousConfigDir = $env:AZURE_CONFIG_DIR
@@ -306,6 +347,12 @@ try {
         $script:existingResources = @(@{id=$approvedId})
         $result = Invoke-LabAutomation -Context $context -Recovery $recovery
         Assert-Test ($result.Status -eq 'Succeeded') 'Service principal recovery uses the approved identity and exact existing resource list.'
+        $dnsRecord | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $previousStatePath
+        $script:existingResources = @($dnsRecovery.ApprovedResourceIds | ForEach-Object { @{id=$_} })
+        $script:events.Clear()
+        $result = Invoke-LabAutomation -Context $context -Recovery $dnsRecovery
+        Assert-Test ($result.Status -eq 'Succeeded' -and -not $script:events.Contains('ResourceDeploymentRequested')) 'Service principal DNS recovery skips resource deployment and completes all guest stages.'
+        $previousRecord | ConvertTo-Json | Set-Content -LiteralPath $previousStatePath
         $script:groupExists = $false
         $script:existingResources = @()
 

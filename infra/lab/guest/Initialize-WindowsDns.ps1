@@ -15,7 +15,7 @@ if ($result.RestartNeeded -eq 'Yes') {
     throw 'Restart the DNS VM, then run this script again.'
 }
 Import-Module DnsServer
-$forwarders = @((Get-DnsServerForwarder).IPAddress | ForEach-Object { $_.ToString() })
+$forwarders = @((Get-DnsServerForwarder).IPAddress | Where-Object { $null -ne $_ } | ForEach-Object { $_.ToString() })
 if ($forwarders.Count -gt 0 -and
     ($forwarders.Count -ne 1 -or $forwarders[0] -ne '168.63.129.16')) {
     throw 'Unexpected existing forwarders. No forwarder configuration was changed.'
@@ -45,7 +45,7 @@ foreach ($protocol in @('UDP', 'TCP')) {
 }
 $adapter = @(Get-NetIPAddress -AddressFamily IPv4 | Where-Object IPAddress -eq '10.30.1.5')
 if ($adapter.Count -ne 1) { throw 'DNS NIC identity is ambiguous.' }
-$effectiveForwarders = @((Get-DnsServerForwarder).IPAddress | ForEach-Object { $_.ToString() })
+$effectiveForwarders = @((Get-DnsServerForwarder).IPAddress | Where-Object { $null -ne $_ } | ForEach-Object { $_.ToString() })
 if ((Get-Service DNS).Status -ne 'Running' -or $effectiveForwarders.Count -ne 1 -or
     $effectiveForwarders[0] -ne '168.63.129.16') {
     throw 'DNS service/forwarder is not ready for self-reference.'

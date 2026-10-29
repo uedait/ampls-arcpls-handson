@@ -409,7 +409,7 @@ function Assert-LabDns {
             throw 'DNS role/service not ready.'
         }
         Import-Module DnsServer -ErrorAction Stop
-        $forwarders = @((Get-DnsServerForwarder).IPAddress | ForEach-Object { $_.ToString() })
+        $forwarders = @((Get-DnsServerForwarder).IPAddress | Where-Object { $null -ne $_ } | ForEach-Object { $_.ToString() })
         if ($forwarders.Count -ne 1 -or $forwarders[0] -ne '168.63.129.16') { throw 'DNS forwarder mismatch.' }
     }
     $answers = @(Resolve-DnsName 'www.microsoft.com' -Server $address -DnsOnly -ErrorAction Stop |

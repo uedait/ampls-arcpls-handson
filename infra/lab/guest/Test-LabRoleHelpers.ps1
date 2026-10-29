@@ -69,6 +69,73 @@ $dnsSwitch = $dnsText.IndexOf('Set-DnsClientServerAddress')
 $dnsProbe = $dnsText.IndexOf('$answers = @(Resolve-DnsName')
 $dnsEffective = $dnsText.IndexOf('$effectiveForwarders =')
 Assert-True ($dnsEffective -ge 0 -and $dnsProbe -gt $dnsEffective -and $dnsSwitch -gt $dnsProbe) 'DNS switch follows effective-forwarder check and explicit self-query'
+$dnsTokens = $null
+$dnsErrors = $null
+$dnsAst = [Management.Automation.Language.Parser]::ParseInput($dnsText, [ref]$dnsTokens, [ref]$dnsErrors)
+$findForwarderAssignment = {
+    param($node)
+    $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+    $node.Left -is [Management.Automation.Language.VariableExpressionAst] -and
+    $node.Left.VariablePath.UserPath -in @('forwarders','effectiveForwarders') -and
+    $node.Right.Extent.Text.Contains('Get-DnsServerForwarder')
+}
+$forwarderAssignments = @($dnsAst.FindAll($findForwarderAssignment, $true)) +
+    @(${function:Assert-LabDns}.Ast.FindAll($findForwarderAssignment, $true))
+Assert-True ($forwarderAssignments.Count -eq 3) 'All DNS forwarder conversions are exercised'
+foreach ($statement in $forwarderAssignments) {
+    foreach ($case in @(
+        @{ Addresses=$null; Expected=@() },
+        @{ Addresses=@([ipaddress]'168.63.129.16'); Expected=@('168.63.129.16') },
+        @{ Addresses=@($null,[ipaddress]'168.63.129.16'); Expected=@('168.63.129.16') },
+        @{ Addresses=@([ipaddress]'1.1.1.1'); Expected=@('1.1.1.1') }
+    )) {
+        $converted = @(& {
+            param($Statement,$Addresses)
+            function Get-DnsServerForwarder { [pscustomobject]@{IPAddress=$Addresses} }
+            . ([scriptblock]::Create($Statement.Extent.Text))
+            foreach ($address in (Get-Variable -Name $Statement.Left.VariablePath.UserPath -ValueOnly)) { $address }
+        } $statement $case.Addresses)
+        Assert-True ($converted.Count -eq $case.Expected.Count) 'Null forwarders produce no address entries'
+        Assert-True (($converted -join ',') -ceq ($case.Expected -join ',')) 'Non-null forwarders preserve their actual address values'
+    }
+}
+$initialGuard = $dnsAst.Find({
+    param($node)
+    $node -is [Management.Automation.Language.IfStatementAst] -and
+    $node.Extent.Text.StartsWith('if ($forwarders.Count -gt 0')
+}, $true)
+$effectiveGuard = $dnsAst.Find({
+    param($node)
+    $node -is [Management.Automation.Language.IfStatementAst] -and
+    $node.Extent.Text.Contains('$effectiveForwarders.Count -ne 1')
+}, $true)
+$roleGuard = ${function:Assert-LabDns}.Ast.Find({
+    param($node)
+    $node -is [Management.Automation.Language.IfStatementAst] -and
+    $node.Extent.Text.StartsWith('if ($forwarders.Count -ne 1')
+}, $true)
+Assert-True ($null -ne $initialGuard -and $null -ne $effectiveGuard -and $null -ne $roleGuard) 'Initial and configured DNS guards are present'
+function Invoke-TestDnsForwarderGuard {
+    param($Guard,[object[]]$Addresses)
+    & {
+        param($Guard,$Addresses)
+        function Get-Service { [pscustomobject]@{Status='Running'} }
+        $forwarders = @($Addresses | Where-Object { $null -ne $_ })
+        $effectiveForwarders = $forwarders
+        . ([scriptblock]::Create($Guard.Extent.Text))
+    } $Guard $Addresses
+}
+Invoke-TestDnsForwarderGuard $initialGuard @()
+Invoke-TestDnsForwarderGuard $initialGuard @('168.63.129.16')
+Assert-True $true 'Initial DNS setup permits empty or already-correct forwarders'
+Assert-Throws { Invoke-TestDnsForwarderGuard $initialGuard @('1.1.1.1') } 'Initial DNS setup refuses an unexpected existing forwarder'
+Assert-Throws { Invoke-TestDnsForwarderGuard $initialGuard @('168.63.129.16','1.1.1.1') } 'Initial DNS setup refuses multiple existing forwarders'
+foreach ($guard in @($effectiveGuard,$roleGuard)) {
+    Invoke-TestDnsForwarderGuard $guard @('168.63.129.16')
+    Assert-True $true 'Configured DNS requires the approved Azure DNS forwarder'
+    Assert-Throws { Invoke-TestDnsForwarderGuard $guard @() } 'Configured DNS rejects an empty effective forwarder list'
+    Assert-Throws { Invoke-TestDnsForwarderGuard $guard @('1.1.1.1') } 'Configured DNS rejects an unexpected forwarder'
+}
 Assert-LabRequest InitializeDns dns $commit $repo ([guid]::NewGuid().ToString())
 Assert-LabRequest PrepareHyperV hyperv $commit $repo $run
 Assert-LabRequest BuildNested hyperv $commit $repo $run

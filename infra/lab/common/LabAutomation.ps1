@@ -344,11 +344,13 @@ function Assert-LabRecoveryContext {
         ConvertFrom-Json -AsHashtable
     $approval = Get-Content -LiteralPath (Join-Path $Recovery.PreviousRunDirectory 'approval.json') -Raw |
         ConvertFrom-Json -AsHashtable
-    if ($previous['Stage'] -ne 'DeployResources' -or $previous['Status'] -ne 'Failed' -or
+    $resumeFrom = if ($Recovery.ContainsKey('ResumeFrom')) { $Recovery.ResumeFrom } else { 'DeployResources' }
+    if ($resumeFrom -notin 'DeployResources','InitializeDns') { throw 'The requested recovery stage is not supported.' }
+    if ($previous['Stage'] -ne $resumeFrom -or $previous['Status'] -ne 'Failed' -or
         $previous['RunId'] -notmatch '^[a-f0-9]{32}$' -or $previous.RunId -eq $Context.RunId -or
         $approval['RunId'] -ne $previous.RunId -or $approval['SourceCommit'] -ne $previous['CommitSha'] -or
         $previous['CommitSha'] -notmatch '^[a-f0-9]{40}$') {
-        throw 'Recovery requires a matching failed resource deployment record from a different run.'
+        throw 'Recovery requires a matching failed run record for the requested stage from a different run.'
     }
     foreach ($key in 'TenantId','SubscriptionId','ResourceGroup','Prefix') {
         if ($previous[$key] -ne $Context[$key]) { throw 'Previous run context does not match the approved recovery target.' }
@@ -366,12 +368,24 @@ function Assert-LabRecoveryContext {
             throw 'An approved recovery resource ID is outside the target resource group.'
         }
     }
+    if ($resumeFrom -eq 'InitializeDns') {
+        $commandPattern = '^lab-' + $previous.RunId.Substring(0, 8) + '-initializedns-[a-f0-9]{6}$'
+        if ($previous['Detail'] -isnot [Collections.IDictionary] -or
+            $previous.Detail['CurrentRole'] -ne 'dns' -or $previous.Detail['LastRunCommand'] -notmatch $commandPattern) {
+            throw 'DNS recovery requires the matching failed DNS role and Run Command record.'
+        }
+        foreach ($role in 'dns','workload','hyperv') {
+            $vmId = $scope + "Microsoft.Compute/virtualMachines/$($Context.Prefix)-$role"
+            if ($approvedIds -notcontains $vmId) { throw 'DNS recovery requires all three approved lab VM IDs.' }
+        }
+    }
 }
 
 function Invoke-LabAutomation {
     param([hashtable]$Context, [hashtable]$Recovery)
     $recovering = $PSBoundParameters.ContainsKey('Recovery') -and $null -ne $Recovery
     if ($recovering) { Assert-LabRecoveryContext -Context $Context -Recovery $Recovery }
+    $guestOnly = $recovering -and $Recovery['ResumeFrom'] -eq 'InitializeDns'
     $stage = 'ValidateInputs'
     try {
         Save-LabRunState $Context $stage 'Running'
@@ -384,15 +398,17 @@ function Invoke-LabAutomation {
             }
         }
         $subscription = @('--subscription', $Context.SubscriptionId)
-        foreach ($size in @($Context.WorkloadVmSize, $Context.DnsVmSize, $Context.HyperVVmSize) | Select-Object -Unique) {
-            $skus = @(Invoke-HandsonAz -Arguments (@('vm', 'list-skus', '--location', $Context.Location,
-                '--size', $size, '--all') + $subscription) -ExpectedContext $Context.AzureContext)
-            $sku = @($skus | Where-Object { $_.name -eq $size -and $_.resourceType -eq 'virtualMachines' })
-            if ($sku.Count -ne 1 -or @($sku[0].restrictions | Where-Object { $_.type -ne 'Zone' }).Count -gt 0) {
-                throw "VM size is unavailable or restricted: $size."
-            }
-            if (@($sku[0].capabilities | Where-Object { $_.name -eq 'HyperVGenerations' -and $_.value -match 'V2' }).Count -ne 1) {
-                throw "Gen2 is unavailable for $size."
+        if (-not $guestOnly) {
+            foreach ($size in @($Context.WorkloadVmSize, $Context.DnsVmSize, $Context.HyperVVmSize) | Select-Object -Unique) {
+                $skus = @(Invoke-HandsonAz -Arguments (@('vm', 'list-skus', '--location', $Context.Location,
+                    '--size', $size, '--all') + $subscription) -ExpectedContext $Context.AzureContext)
+                $sku = @($skus | Where-Object { $_.name -eq $size -and $_.resourceType -eq 'virtualMachines' })
+                if ($sku.Count -ne 1 -or @($sku[0].restrictions | Where-Object { $_.type -ne 'Zone' }).Count -gt 0) {
+                    throw "VM size is unavailable or restricted: $size."
+                }
+                if (@($sku[0].capabilities | Where-Object { $_.name -eq 'HyperVGenerations' -and $_.value -match 'V2' }).Count -ne 1) {
+                    throw "Gen2 is unavailable for $size."
+                }
             }
         }
         $groups = @(Invoke-HandsonAz -Arguments (@('group', 'list') + $subscription) -ExpectedContext $Context.AzureContext)
@@ -417,24 +433,26 @@ function Invoke-LabAutomation {
             if ($recovering) { throw 'The approved recovery resource group is missing. No resource group was created.' }
             $null = Invoke-HandsonAz -Arguments (@('group', 'create', '--name', $Context.ResourceGroup, '--location', $Context.Location) + $subscription) -ExpectedContext $Context.AzureContext
         }
-        $stage = 'DeployResources'
-        Save-LabRunState $Context $stage 'Running'
-        $compiled = Get-LabDeploymentTemplate -Context $Context
-        $body = @{
-            properties=@{
-                mode='Incremental'; template=$compiled
-                parameters=@{
-                    prefix=@{value=$Context.Prefix}; location=@{value=$Context.Location}
-                    workloadVmSize=@{value=$Context.WorkloadVmSize}; dnsVmSize=@{value=$Context.DnsVmSize}
-                    hyperVVmSize=@{value=$Context.HyperVVmSize}; adminUsername=@{value=$Context.VmCredential.UserName}
-                    adminPassword=@{value=$Context.VmCredential.GetNetworkCredential().Password}
+        if (-not $guestOnly) {
+            $stage = 'DeployResources'
+            Save-LabRunState $Context $stage 'Running'
+            $compiled = Get-LabDeploymentTemplate -Context $Context
+            $body = @{
+                properties=@{
+                    mode='Incremental'; template=$compiled
+                    parameters=@{
+                        prefix=@{value=$Context.Prefix}; location=@{value=$Context.Location}
+                        workloadVmSize=@{value=$Context.WorkloadVmSize}; dnsVmSize=@{value=$Context.DnsVmSize}
+                        hyperVVmSize=@{value=$Context.HyperVVmSize}; adminUsername=@{value=$Context.VmCredential.UserName}
+                        adminPassword=@{value=$Context.VmCredential.GetNetworkCredential().Password}
+                    }
                 }
             }
+            $deploymentPath = Get-LabResourcePath $Context 'providers/Microsoft.Resources/deployments/optional-lab?api-version=2022-09-01'
+            try { $null = Invoke-LabArm -Context $Context -Method PUT -Path $deploymentPath -Body $body }
+            finally { $body = $null }
+            Wait-LabDeployment -Context $Context -Path $deploymentPath
         }
-        $deploymentPath = Get-LabResourcePath $Context 'providers/Microsoft.Resources/deployments/optional-lab?api-version=2022-09-01'
-        try { $null = Invoke-LabArm -Context $Context -Method PUT -Path $deploymentPath -Body $body }
-        finally { $body = $null }
-        Wait-LabDeployment -Context $Context -Path $deploymentPath
         $stage = 'StageSource'
         Save-LabRunState $Context $stage 'Running'
         foreach ($role in 'dns', 'workload', 'hyperv') {
