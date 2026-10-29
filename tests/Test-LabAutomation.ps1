@@ -34,6 +34,19 @@ $valid = @{
     L2Ready=$true; HandoverReady=$true; ImdsBlocked=$true; Licensed=$true
 }
 try {
+    $copyStatement = ${function:Get-LabSource}.Ast.Find({
+        param($node)
+        $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+        $node.Extent.Text -match '^\$null\s*=\s*\$response\.Content\.CopyToAsync'
+    }, $true)
+    Assert-Test ($null -ne $copyStatement) 'Archive download suppresses the internal asynchronous completion result.'
+    $response = [pscustomobject]@{Content=[Net.Http.StringContent]::new('synthetic archive bytes')}
+    $stream = [IO.MemoryStream]::new()
+    try {
+        $copyResult = @(& ([scriptblock]::Create($copyStatement.Extent.Text)))
+        Assert-Test ($copyResult.Count -eq 0 -and $stream.Length -gt 0) 'The actual archive copy statement writes bytes without returning VoidTaskResult.'
+    } finally { $stream.Dispose(); $response.Content.Dispose() }
+
     $instance = @{output='LAB_RESULT:' + ($valid | ConvertTo-Json -Compress)}
     $result = Assert-LabRoleResult $context hyperv VerifyBuild $instance
     Assert-Test ($result.Licensed -eq $true) 'Valid structured readiness result.'

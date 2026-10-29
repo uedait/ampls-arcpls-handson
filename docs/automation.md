@@ -37,6 +37,8 @@ VM の配置先に可用性ゾーンは指定しません。VM サイズの利�
 
 Azure API の要求成功、Run Command の ProvisioningState、ゲストスクリプトの成否は別に確認します。Managed Run Command は instanceView の実行状態、終了コード、ゲストが返した今回の Run ID・コミット・役割・確認結果を照合して判定します。
 
+管理端末のソース取得処理は、コミット SHA、ZIP の SHA-256、展開先を含む単一のハッシュテーブルを返します。ダウンロードの内部処理の戻り値は出力に含めません。
+
 ## 資格情報と取得ファイル
 
 Private GitHub の長期トークンは管理端末の GitHub CLI 認証から使用します。各 VM にはコミット固定 ZIP の短期取得 URL を Managed Run Command の保護パラメーターで渡します。URL を発行してから直ちに使用し、GitHub トークン自体を各 VM に保存する方式は採用しません。

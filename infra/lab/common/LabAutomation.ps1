@@ -131,7 +131,7 @@ function Get-LabSource {
                 throw "Source archive download failed (HTTP $([int]$response.StatusCode))."
             }
             $stream = [IO.File]::Create($zip)
-            try { $response.Content.CopyToAsync($stream).GetAwaiter().GetResult() }
+            try { $null = $response.Content.CopyToAsync($stream).GetAwaiter().GetResult() }
             finally { $stream.Dispose() }
         } finally { $response.Dispose() }
     } finally { $client.Dispose(); $url = $null }
