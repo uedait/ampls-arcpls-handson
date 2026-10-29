@@ -25,6 +25,56 @@ foreach ($file in Get-ChildItem -LiteralPath $PSScriptRoot -Filter '*.ps1' -Recu
     [void][Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tokens, [ref]$errors)
     Assert-True ($errors.Count -eq 0) "PowerShell parsing: $($file.Name)"
 }
+$parentTokens = $null
+$parentErrors = $null
+$parentAst = [Management.Automation.Language.Parser]::ParseFile(
+    (Join-Path $PSScriptRoot 'New-NestedParentDisk.ps1'), [ref]$parentTokens, [ref]$parentErrors)
+$cleanupCommands = @($parentAst.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.CommandAst] -and
+    $node.GetCommandName() -in @('Dismount-VHD','Dismount-DiskImage')
+}, $true))
+$cleanupStatements = @($parentAst.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+    $node.Left -is [Management.Automation.Language.VariableExpressionAst] -and
+    $node.Left.VariablePath.UserPath -eq 'null' -and
+    $node.Right.Extent.Text -match '\bDismount-(?:VHD|DiskImage)\b'
+}, $true))
+Assert-True ($cleanupCommands.Count -eq 4 -and $cleanupStatements.Count -eq $cleanupCommands.Count) 'All normal and finally unmount results are suppressed'
+function Invoke-TestParentCleanup {
+    param($Statement,[switch]$FailCleanup)
+    & {
+        param($Statement,$FailCleanup)
+        $parentPath = 'C:\SyntheticParent.vhdx'
+        $IsoPath = 'C:\SyntheticMedia.iso'
+        function Dismount-VHD {
+            [CmdletBinding()]
+            param([string]$Path)
+            if ($FailCleanup) { throw 'Synthetic unmount failure' }
+            [pscustomobject]@{NoisyCompletion=$true}
+        }
+        function Dismount-DiskImage {
+            [CmdletBinding()]
+            param([string]$ImagePath)
+            if ($FailCleanup) { throw 'Synthetic unmount failure' }
+            [pscustomobject]@{NoisyCompletion=$true}
+        }
+        . ([scriptblock]::Create($Statement.Extent.Text))
+    } $Statement $FailCleanup
+}
+foreach ($statement in $cleanupStatements) {
+    $output = @(Invoke-TestParentCleanup $statement)
+    Assert-True ($output.Count -eq 0) 'Noisy unmount cmdlets cannot add a second parent return value'
+    Assert-Throws { Invoke-TestParentCleanup $statement -FailCleanup } 'Suppressing completion output does not suppress unmount failures'
+}
+$cachedReturn = @(& {
+    param($Statements)
+    try { return 'C:\SyntheticParent.vhdx' }
+    finally { foreach ($statement in $Statements) { Invoke-TestParentCleanup $statement } }
+} $cleanupStatements)
+Assert-True ($cachedReturn.Count -eq 1 -and $cachedReturn[0] -is [string] -and
+    $cachedReturn[0] -ceq 'C:\SyntheticParent.vhdx') 'A cached parent return remains exactly one VHDX string after finally cleanup'
 Assert-NestedOfficialUri ([uri]'https://download.microsoft.com/media.iso')
 foreach ($bad in @(
     'http://download.microsoft.com/media.iso',

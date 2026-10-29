@@ -345,7 +345,7 @@ function Assert-LabRecoveryContext {
     $approval = Get-Content -LiteralPath (Join-Path $Recovery.PreviousRunDirectory 'approval.json') -Raw |
         ConvertFrom-Json -AsHashtable
     $resumeFrom = if ($Recovery.ContainsKey('ResumeFrom')) { $Recovery.ResumeFrom } else { 'DeployResources' }
-    if ($resumeFrom -notin 'DeployResources','InitializeDns') { throw 'The requested recovery stage is not supported.' }
+    if ($resumeFrom -notin 'DeployResources','InitializeDns','BuildNested') { throw 'The requested recovery stage is not supported.' }
     if ($previous['Stage'] -ne $resumeFrom -or $previous['Status'] -ne 'Failed' -or
         $previous['RunId'] -notmatch '^[a-f0-9]{32}$' -or $previous.RunId -eq $Context.RunId -or
         $approval['RunId'] -ne $previous.RunId -or $approval['SourceCommit'] -ne $previous['CommitSha'] -or
@@ -368,15 +368,16 @@ function Assert-LabRecoveryContext {
             throw 'An approved recovery resource ID is outside the target resource group.'
         }
     }
-    if ($resumeFrom -eq 'InitializeDns') {
-        $commandPattern = '^lab-' + $previous.RunId.Substring(0, 8) + '-initializedns-[a-f0-9]{6}$'
+    if ($resumeFrom -in 'InitializeDns','BuildNested') {
+        $expectedRole = if ($resumeFrom -eq 'InitializeDns') { 'dns' } else { 'hyperv' }
+        $commandPattern = '^lab-' + $previous.RunId.Substring(0, 8) + '-' + $resumeFrom.ToLowerInvariant() + '-[a-f0-9]{6}$'
         if ($previous['Detail'] -isnot [Collections.IDictionary] -or
-            $previous.Detail['CurrentRole'] -ne 'dns' -or $previous.Detail['LastRunCommand'] -notmatch $commandPattern) {
-            throw 'DNS recovery requires the matching failed DNS role and Run Command record.'
+            $previous.Detail['CurrentRole'] -ne $expectedRole -or $previous.Detail['LastRunCommand'] -notmatch $commandPattern) {
+            throw "Guest recovery requires the matching failed $expectedRole role and Run Command record."
         }
         foreach ($role in 'dns','workload','hyperv') {
             $vmId = $scope + "Microsoft.Compute/virtualMachines/$($Context.Prefix)-$role"
-            if ($approvedIds -notcontains $vmId) { throw 'DNS recovery requires all three approved lab VM IDs.' }
+            if ($approvedIds -notcontains $vmId) { throw 'Guest recovery requires all three approved lab VM IDs.' }
         }
     }
 }
@@ -385,7 +386,8 @@ function Invoke-LabAutomation {
     param([hashtable]$Context, [hashtable]$Recovery)
     $recovering = $PSBoundParameters.ContainsKey('Recovery') -and $null -ne $Recovery
     if ($recovering) { Assert-LabRecoveryContext -Context $Context -Recovery $Recovery }
-    $guestOnly = $recovering -and $Recovery['ResumeFrom'] -eq 'InitializeDns'
+    $guestOnly = $recovering -and ($Recovery['ResumeFrom'] -in 'InitializeDns','BuildNested')
+    $nestedOnly = $recovering -and $Recovery['ResumeFrom'] -eq 'BuildNested'
     $stage = 'ValidateInputs'
     try {
         Save-LabRunState $Context $stage 'Running'
@@ -462,26 +464,28 @@ function Invoke-LabAutomation {
             if ([string]$probe.output -notmatch 'LAB_WARMUP_READY') { throw "Managed Run Command warmup failed for $role." }
             $null = Invoke-LabRoleAction -Context $Context -Role $role -Action StageSource -Download
         }
-        $stage = 'InitializeDns'
-        Save-LabRunState $Context $stage 'Running'
-        $dns = Invoke-LabRoleAction -Context $Context -Role dns -Action InitializeDns
-        if ($dns.RebootRequired -eq $true) {
-            Restart-LabVm -Context $Context -Role dns
+        if (-not $nestedOnly) {
+            $stage = 'InitializeDns'
+            Save-LabRunState $Context $stage 'Running'
             $dns = Invoke-LabRoleAction -Context $Context -Role dns -Action InitializeDns
-            if ($dns.RebootRequired -eq $true) { throw 'DNS VM requested a second restart; inspect its feature state.' }
-        }
-        foreach ($role in 'dns', 'hyperv') {
-            $null = Invoke-HandsonAz -Arguments (@('network', 'nic', 'update',
-                '--resource-group', $Context.ResourceGroup, '--name', "$($Context.Prefix)-$role-nic",
-                '--dns-servers', '10.30.1.5') + $subscription) -ExpectedContext $Context.AzureContext
-        }
-        $stage = 'PrepareHyperV'
-        Save-LabRunState $Context $stage 'Running'
-        $hyperv = Invoke-LabRoleAction -Context $Context -Role hyperv -Action PrepareHyperV
-        if ($hyperv.RebootRequired -eq $true) {
-            Restart-LabVm -Context $Context -Role hyperv
+            if ($dns.RebootRequired -eq $true) {
+                Restart-LabVm -Context $Context -Role dns
+                $dns = Invoke-LabRoleAction -Context $Context -Role dns -Action InitializeDns
+                if ($dns.RebootRequired -eq $true) { throw 'DNS VM requested a second restart; inspect its feature state.' }
+            }
+            foreach ($role in 'dns', 'hyperv') {
+                $null = Invoke-HandsonAz -Arguments (@('network', 'nic', 'update',
+                    '--resource-group', $Context.ResourceGroup, '--name', "$($Context.Prefix)-$role-nic",
+                    '--dns-servers', '10.30.1.5') + $subscription) -ExpectedContext $Context.AzureContext
+            }
+            $stage = 'PrepareHyperV'
+            Save-LabRunState $Context $stage 'Running'
             $hyperv = Invoke-LabRoleAction -Context $Context -Role hyperv -Action PrepareHyperV
-            if ($hyperv.RebootRequired -eq $true) { throw 'L1 requested a second restart; inspect Hyper-V state.' }
+            if ($hyperv.RebootRequired -eq $true) {
+                Restart-LabVm -Context $Context -Role hyperv
+                $hyperv = Invoke-LabRoleAction -Context $Context -Role hyperv -Action PrepareHyperV
+                if ($hyperv.RebootRequired -eq $true) { throw 'L1 requested a second restart; inspect Hyper-V state.' }
+            }
         }
         $stage = 'BuildNested'
         Save-LabRunState $Context $stage 'Running'

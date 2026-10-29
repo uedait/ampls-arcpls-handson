@@ -134,12 +134,12 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'DISM Apply-Image failed.' }
     & "${windowsRoot}Windows\System32\bcdboot.exe" "${windowsRoot}Windows" /s "$($efi.DriveLetter):" /f UEFI | Out-Host
     if ($LASTEXITCODE -ne 0) { throw 'BCDBoot failed.' }
-    Dismount-VHD -Path $parentPath
+    $null = Dismount-VHD -Path $parentPath
     $vhdMounted = $false
     (Get-Item -LiteralPath $parentPath).IsReadOnly = $true
     $manifest.ParentSha256 = (Get-FileHash -LiteralPath $parentPath -Algorithm SHA256).Hash
     # Ready is written only after all owned mounts have been released.
-    Dismount-DiskImage -ImagePath $IsoPath
+    $null = Dismount-DiskImage -ImagePath $IsoPath
     $isoMounted = $false
     $manifest.Status = 'Ready'
     Save-NestedManifest $manifestPath $manifest
@@ -153,9 +153,9 @@ catch {
     throw
 }
 finally {
-    try { if ($vhdMounted) { Dismount-VHD -Path $parentPath -ErrorAction Stop } }
+    try { if ($vhdMounted) { $null = Dismount-VHD -Path $parentPath -ErrorAction Stop } }
     finally {
-        try { if ($isoMounted) { Dismount-DiskImage -ImagePath $IsoPath -ErrorAction Stop } }
+        try { if ($isoMounted) { $null = Dismount-DiskImage -ImagePath $IsoPath -ErrorAction Stop } }
         finally { $lock.Dispose() }
     }
 }

@@ -331,6 +331,33 @@ try {
     $script:events.Clear()
     Assert-Throws { Invoke-LabAutomation -Context $context -Recovery $dnsRecovery } 'Lab deployment stopped at ValidateInputs'
     Assert-Test (-not $script:events.Contains('StageSource/Running')) 'DNS recovery rejects changed resource inventories before guest operations.'
+    $nestedRecord = $dnsRecord.Clone()
+    $nestedRecord.Stage = 'BuildNested'
+    $nestedRecord.Detail = @{CurrentRole='hyperv'; LastRunCommand='lab-dddddddd-buildnested-123abc'}
+    $nestedRecord | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $previousStatePath
+    $nestedRecovery = $dnsRecovery.Clone()
+    $nestedRecovery.ResumeFrom = 'BuildNested'
+    $script:existingResources = @($nestedRecovery.ApprovedResourceIds | ForEach-Object { @{id=$_} })
+    $script:events.Clear()
+    $result = Invoke-LabAutomation -Context $context -Recovery $nestedRecovery
+    Assert-Test ($result.Status -eq 'Succeeded' -and $script:events.Contains('hyperv/BuildNested') -and
+        $script:events.Contains('RestrictionApplied')) 'Nested recovery completes L2 creation and final restriction.'
+    Assert-Test (-not $script:events.Contains('ResourceDeploymentRequested') -and
+        -not $script:events.Contains('dns/InitializeDns') -and
+        -not $script:events.Contains('NicDns') -and
+        -not $script:events.Contains('hyperv/PrepareHyperV') -and
+        -not $script:events.Contains('Restart:hyperv')) 'Nested recovery never repeats VM, network, DNS or Hyper-V deployment.'
+    $invalidNestedRecord = $nestedRecord.Clone()
+    $invalidNestedRecord.Detail = @{CurrentRole='dns'; LastRunCommand='lab-dddddddd-buildnested-123abc'}
+    $invalidNestedRecord | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $previousStatePath
+    Assert-Throws { Invoke-LabAutomation -Context $context -Recovery $nestedRecovery } 'matching failed hyperv role'
+    $invalidNestedRecord.Detail = @{CurrentRole='hyperv'; LastRunCommand='lab-dddddddd-initializedns-123abc'}
+    $invalidNestedRecord | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $previousStatePath
+    Assert-Throws { Invoke-LabAutomation -Context $context -Recovery $nestedRecovery } 'matching failed hyperv role'
+    $nestedRecord | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $previousStatePath
+    $missingNestedVm = $nestedRecovery.Clone()
+    $missingNestedVm.ApprovedResourceIds = @($approvedId) + $vmIds[0,1]
+    Assert-Throws { Invoke-LabAutomation -Context $context -Recovery $missingNestedVm } 'all three approved lab VM IDs'
     $previousRecord | ConvertTo-Json | Set-Content -LiteralPath $previousStatePath
     $script:groupExists = $false
     $script:existingResources = @()
@@ -352,6 +379,12 @@ try {
         $script:events.Clear()
         $result = Invoke-LabAutomation -Context $context -Recovery $dnsRecovery
         Assert-Test ($result.Status -eq 'Succeeded' -and -not $script:events.Contains('ResourceDeploymentRequested')) 'Service principal DNS recovery skips resource deployment and completes all guest stages.'
+        $nestedRecord | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $previousStatePath
+        $script:existingResources = @($nestedRecovery.ApprovedResourceIds | ForEach-Object { @{id=$_} })
+        $script:events.Clear()
+        $result = Invoke-LabAutomation -Context $context -Recovery $nestedRecovery
+        Assert-Test ($result.Status -eq 'Succeeded' -and -not $script:events.Contains('ResourceDeploymentRequested') -and
+            -not $script:events.Contains('dns/InitializeDns')) 'Service principal nested recovery retains the identity guard without repeating completed deployment.'
         $previousRecord | ConvertTo-Json | Set-Content -LiteralPath $previousStatePath
         $script:groupExists = $false
         $script:existingResources = @()
