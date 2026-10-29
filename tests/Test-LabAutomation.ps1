@@ -123,6 +123,8 @@ try {
     $script:prepareCalls = 0
     $script:clientId = '33333333-3333-3333-3333-333333333333'
     $script:authenticationType = 'user'
+    $script:skuRestrictions = @()
+    $script:skuGen2 = $true
     function Save-LabRunState {
         param($Context, $Stage, $Status, $Detail=@{})
         $script:events.Add("$Stage/$Status")
@@ -136,7 +138,8 @@ try {
         }
         if ($line -like 'vm list-skus*') {
             $size = $Arguments[[array]::IndexOf($Arguments, '--size') + 1]
-            return @(@{name=$size; resourceType='virtualMachines'; restrictions=@(); capabilities=@(@{name='HyperVGenerations';value='V1,V2'})})
+            $generations = if ($script:skuGen2) { 'V1,V2' } else { 'V1' }
+            return @(@{name=$size; resourceType='virtualMachines'; restrictions=$script:skuRestrictions; capabilities=@(@{name='HyperVGenerations';value=$generations})})
         }
         if ($line -like 'group list*') { return @() }
         if ($line -like 'group create*') { $script:events.Add('GroupCreated'); return @{name='rg-test'} }
@@ -178,6 +181,29 @@ try {
     Assert-Test ($script:events.IndexOf('RestrictionApplied') -lt $script:events.IndexOf('dns/VerifyRestricted')) 'Restriction precedes fresh connection checks.'
     Assert-Test ($script:events[$script:events.Count-1] -eq 'Complete/Succeeded') 'Completion is the final state.'
     Assert-Test ($script:deploymentBody.properties.parameters.adminPassword.value -eq $context.VmCredential.GetNetworkCredential().Password) 'VM password is handed to the in-memory secure ARM parameter.'
+
+    foreach ($zones in @(@('1'), @('1', '3'))) {
+        $script:skuRestrictions = @(@{type='Zone'; reasonCode='NotAvailableForSubscription'; restrictionInfo=@{locations=@('japaneast'); zones=$zones}})
+        $result = Invoke-LabAutomation $context
+        Assert-Test ($result.Status -eq 'Succeeded') 'Zone-only restrictions allow a deployment without a pinned zone.'
+    }
+    foreach ($restrictions in @(
+        @(@{type='Location'}),
+        @(@{type='Zone'}, @{type='Location'}),
+        @(@{type='Unknown'}),
+        @(@{type='Zone'}, @{type='Unknown'})
+    )) {
+        $script:skuRestrictions = $restrictions
+        $script:events.Clear()
+        Assert-Throws { Invoke-LabAutomation $context } 'Lab deployment stopped at ValidateInputs'
+        Assert-Test (-not $script:events.Contains('GroupCreated') -and -not $script:events.Contains('DeployResources/Running')) 'Location, mixed and unknown restrictions prevent resource creation.'
+    }
+    $script:skuRestrictions = @()
+    $script:skuGen2 = $false
+    $script:events.Clear()
+    Assert-Throws { Invoke-LabAutomation $context } 'Lab deployment stopped at ValidateInputs'
+    Assert-Test (-not $script:events.Contains('GroupCreated')) 'Gen2 remains mandatory before resource creation.'
+    $script:skuGen2 = $true
 
     $previousConfigDir = $env:AZURE_CONFIG_DIR
     try {

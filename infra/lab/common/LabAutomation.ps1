@@ -347,7 +347,9 @@ function Invoke-LabAutomation {
             $skus = @(Invoke-HandsonAz -Arguments (@('vm', 'list-skus', '--location', $Context.Location,
                 '--size', $size, '--all') + $subscription) -ExpectedContext $Context.AzureContext)
             $sku = @($skus | Where-Object { $_.name -eq $size -and $_.resourceType -eq 'virtualMachines' })
-            if ($sku.Count -ne 1 -or @($sku[0].restrictions).Count -gt 0) { throw "VM size is unavailable or restricted: $size." }
+            if ($sku.Count -ne 1 -or @($sku[0].restrictions | Where-Object { $_.type -ne 'Zone' }).Count -gt 0) {
+                throw "VM size is unavailable or restricted: $size."
+            }
             if (@($sku[0].capabilities | Where-Object { $_.name -eq 'HyperVGenerations' -and $_.value -match 'V2' }).Count -ne 1) {
                 throw "Gen2 is unavailable for $size."
             }
