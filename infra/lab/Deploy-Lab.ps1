@@ -3,6 +3,7 @@
 param(
     [guid]$TenantId,
     [guid]$SubscriptionId,
+    [guid]$ClientId,
     [string]$ResourceGroupName,
     [ValidatePattern('^[a-z][a-z0-9]{1,11}$')][string]$Prefix = 'arclab',
     [string]$Location = 'japaneast',
@@ -27,26 +28,39 @@ function Read-LabDefault {
     return $value
 }
 
-$accounts = @(Invoke-HandsonAz -Arguments @('account', 'list', '--all'))
-if ($accounts.Count -eq 0) {
-    Write-Host 'Azure CLI sign-in is required. Complete the interactive sign-in.'
-    $login = @('login', '--output', 'none')
-    if ($TenantId -and $TenantId -ne [guid]::Empty) { $login += @('--tenant', $TenantId.ToString()) }
-    & az @login
-    if ($LASTEXITCODE -ne 0) { throw 'Azure CLI sign-in failed.' }
+if ($PSBoundParameters.ContainsKey('ClientId')) {
+    if (-not $TenantId -or $TenantId -eq [guid]::Empty -or
+        -not $SubscriptionId -or $SubscriptionId -eq [guid]::Empty -or $ClientId -eq [guid]::Empty) {
+        throw 'Service principal execution requires explicit non-empty TenantId, SubscriptionId and ClientId.'
+    }
+    $azContext = @{
+        ExpectedTenantId=$TenantId; ExpectedSubscriptionId=$SubscriptionId
+        ExpectedClientId=$ClientId; ExpectedAzureConfigDir=$env:AZURE_CONFIG_DIR
+    }
+    Assert-HandsonAzContext @azContext
+} else {
+    $accounts = @(Invoke-HandsonAz -Arguments @('account', 'list', '--all'))
+    if ($accounts.Count -eq 0) {
+        Write-Host 'Azure CLI sign-in is required. Complete the interactive sign-in.'
+        $login = @('login', '--output', 'none')
+        if ($TenantId -and $TenantId -ne [guid]::Empty) { $login += @('--tenant', $TenantId.ToString()) }
+        & az @login
+        if ($LASTEXITCODE -ne 0) { throw 'Azure CLI sign-in failed.' }
+    }
+    $account = Invoke-HandsonAz -Arguments @('account', 'show')
+    if (-not $SubscriptionId -or $SubscriptionId -eq [guid]::Empty) {
+        $SubscriptionId = [guid](Read-LabDefault 'Subscription ID' $account.id)
+    }
+    if (-not $TenantId -or $TenantId -eq [guid]::Empty) { $TenantId = [guid]$account.tenantId }
+    $selected = Invoke-HandsonAz -Arguments @('account', 'show', '--subscription', $SubscriptionId.ToString())
+    if ($selected.tenantId -ne $TenantId.ToString() -or $selected.state -ne 'Enabled' -or $selected.user.type -ne 'user') {
+        throw 'Select an enabled subscription in the expected tenant using your interactive Azure CLI login.'
+    }
+    & az account set --subscription $SubscriptionId.ToString()
+    if ($LASTEXITCODE -ne 0) { throw 'Azure CLI subscription selection failed.' }
+    Assert-HandsonAzContext -ExpectedTenantId $TenantId -ExpectedSubscriptionId $SubscriptionId
+    $azContext = @{ExpectedTenantId=$TenantId; ExpectedSubscriptionId=$SubscriptionId}
 }
-$account = Invoke-HandsonAz -Arguments @('account', 'show')
-if (-not $SubscriptionId -or $SubscriptionId -eq [guid]::Empty) {
-    $SubscriptionId = [guid](Read-LabDefault 'Subscription ID' $account.id)
-}
-if (-not $TenantId -or $TenantId -eq [guid]::Empty) { $TenantId = [guid]$account.tenantId }
-$selected = Invoke-HandsonAz -Arguments @('account', 'show', '--subscription', $SubscriptionId.ToString())
-if ($selected.tenantId -ne $TenantId.ToString() -or $selected.state -ne 'Enabled' -or $selected.user.type -ne 'user') {
-    throw 'Select an enabled subscription in the expected tenant using your interactive Azure CLI login.'
-}
-& az account set --subscription $SubscriptionId.ToString()
-if ($LASTEXITCODE -ne 0) { throw 'Azure CLI subscription selection failed.' }
-Assert-HandsonAzContext -ExpectedTenantId $TenantId -ExpectedSubscriptionId $SubscriptionId
 if (-not $ResourceGroupName) { $ResourceGroupName = Read-LabDefault 'New lab resource group' "rg-$Prefix-lab" }
 if ($ResourceGroupName -notmatch '^[A-Za-z0-9_().-]{1,90}$' -or $ResourceGroupName.EndsWith('.')) { throw 'Invalid lab resource group name.' }
 $Prefix = Read-LabDefault 'VM/resource alias prefix (2-12 lowercase letters/digits)' $Prefix
@@ -78,6 +92,7 @@ try {
         $vmCredential.UserName -in 'Administrator', 'Admin', 'Guest') { throw 'Choose a supported Azure VM administrator name, for example labadmin.' }
     if ($vmCredential.Password.Length -lt 12 -or $l2Credential.Password.Length -lt 12) { throw 'Use administrator passwords of at least 12 characters with Windows/Azure complexity requirements.' }
     Write-Host "Tenant: $TenantId / Subscription: $SubscriptionId"
+    if ($azContext.ContainsKey('ExpectedClientId')) { Write-Host "Service principal: $ClientId" }
     Write-Host "RG: $ResourceGroupName / Location: $Location / Alias: $Prefix"
     Write-Host "Source: $Repository / $($source.CommitSha)"
     Write-Host "VMs: $WorkloadVmSize, $DnsVmSize, $HyperVVmSize / Nested: Windows Server 2022 Evaluation"
@@ -88,6 +103,7 @@ try {
     }
     $context = @{
         TenantId=$TenantId.ToString(); SubscriptionId=$SubscriptionId.ToString()
+        AzureContext=$azContext
         ResourceGroup=$ResourceGroupName; Prefix=$Prefix; Location=$Location
         WorkloadVmSize=$WorkloadVmSize; DnsVmSize=$DnsVmSize; HyperVVmSize=$HyperVVmSize
         Repository=$Repository; Source=$source; GitHubToken=$githubToken

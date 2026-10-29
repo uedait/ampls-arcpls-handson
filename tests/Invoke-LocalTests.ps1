@@ -12,6 +12,7 @@ $temporary = Join-Path ([IO.Path]::GetTempPath()) ('ampls-handson-tests-' + [gui
 $null = New-Item -ItemType Directory -Path $temporary
 $previousPath = $env:PATH
 $previousState = $env:HANDSON_TEST_STATE_DIR
+$previousConfigDir = $env:AZURE_CONFIG_DIR
 $tenant = '11111111-1111-1111-1111-111111111111'
 $subscription = '22222222-2222-2222-2222-222222222222'
 $target = "/subscriptions/$subscription/resourceGroups/test/providers/Microsoft.Compute/virtualMachines/test-vm"
@@ -29,9 +30,22 @@ function Return-Json($value) {
 }
 $line = $arguments -join ' '
 if ($line.StartsWith('account show ')) {
+    if ($state.mode -eq 'account-failure') { Write-Error 'Synthetic unauthenticated context'; exit 9 }
     $tenant = if ($state.mode -eq 'mismatch') { '33333333-3333-3333-3333-333333333333' } else { $state.tenant }
-    Return-Json @{ tenantId=$tenant; id=$state.subscription; state='Enabled' }
+    $subscription = if ($state.mode -eq 'subscription-mismatch') { '99999999-9999-9999-9999-999999999999' } else { $state.subscription }
+    $client = if ($state.mode -eq 'client-mismatch') { '99999999-9999-9999-9999-999999999999' } else { $state.client }
+    $type = if ($state.mode -eq 'type-mismatch') { 'user' } else { $state.authenticationType }
+    $status = if ($state.mode -eq 'disabled') { 'Disabled' } else { 'Enabled' }
+    if ($state.mode -eq 'identity-changed') {
+        $state.accountChecks++
+        $state | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath $statePath
+        if ($state.accountChecks -gt 1) { $client='99999999-9999-9999-9999-999999999999' }
+    }
+    Return-Json @{ tenantId=$tenant; id=$subscription; state=$status; user=@{type=$type; name=$client} }
 }
+if ($line.StartsWith('account list ')) { Return-Json @(@{id=$state.subscription}) }
+if ($line.StartsWith('account set ') -or $line.StartsWith('vm restart ')) { Return-Json @{} }
+if ($line.StartsWith('login ')) { throw 'Unexpected login: synthetic tests must not authenticate.' }
 if ($line -match '^(vm|connectedmachine) extension show ') {
     if ($state.mode -eq 'missing-extension') { Write-Error 'Synthetic missing extension'; exit 3 }
     Return-Json $state.extension
@@ -102,9 +116,10 @@ if ($line.StartsWith('network nsg rule show ')) {
 }
 throw "Unexpected synthetic CLI invocation: $line"
 '@
-function Reset-State([string]$Mode, [object[]]$Associations = @()) {
+function Reset-State([string]$Mode, [object[]]$Associations = @(), [string]$AuthenticationType = 'user') {
     @{
         mode = $Mode; tenant = $tenant; subscription = $subscription
+        authenticationType=$AuthenticationType; client='44444444-4444-4444-4444-444444444444'; accountChecks=0
         associations = $Associations
         nsgAccess = @{ 'arclab-workload-nsg'='Allow'; 'arclab-dns-nsg'='Allow'; 'arclab-hyperv-nsg'='Allow' }
         extension = @{
@@ -128,7 +143,7 @@ function Get-TestState {
 }
 function Assert-NoWrites {
     $calls = Get-Content -LiteralPath (Join-Path $temporary 'calls.jsonl') -Raw
-    if ($calls -match '"(set|update|create)"') { throw 'Unexpected write invocation.' }
+    if ($calls -match '"(set|update|create|restart|invoke)"') { throw 'Unexpected write invocation.' }
 }
 try {
     Set-Content -LiteralPath (Join-Path $temporary 'fake-az.ps1') -Value $handler -Encoding utf8NoBOM
@@ -137,6 +152,7 @@ try {
     Set-Content -LiteralPath (Join-Path $temporary 'az.cmd') -Value $cmd -Encoding ascii
     $env:PATH = "$temporary;$previousPath"
     $env:HANDSON_TEST_STATE_DIR = $temporary
+    $env:AZURE_CONFIG_DIR = $temporary
     $common = @{ ExpectedTenantId=$tenant; ExpectedSubscriptionId=$subscription }
     $ama = Join-Path $root 'scripts\Set-AmaDirect.ps1'
     $association = Join-Path $root 'scripts\Set-DceAssociation.ps1'
@@ -223,10 +239,104 @@ try {
     $null = & $phase @common -ResourceGroup test -Mode Restricted -WhatIf
     Assert-NoWrites
     Write-Output 'PASS: phase WhatIf leaves NSGs unchanged.'
+
+    $client = '44444444-4444-4444-4444-444444444444'
+    $servicePrincipal = $common.Clone()
+    $servicePrincipal.ExpectedClientId = $client
+    Reset-State 'normal' -AuthenticationType servicePrincipal
+    $null = & $phase @servicePrincipal -ResourceGroup test -Mode Restricted -Confirm:$false
+    if (@((Get-TestState).nsgAccess.Values | Where-Object { $_ -ne 'Deny' }).Count -gt 0) { throw 'Service principal did not restrict every NSG.' }
+    Write-Output 'PASS: service principal applies the same verified NSG changes.'
+
+    foreach ($mode in 'mismatch', 'subscription-mismatch', 'client-mismatch', 'type-mismatch', 'disabled', 'identity-changed') {
+        Reset-State $mode -AuthenticationType servicePrincipal
+        Assert-Failure { & $phase @servicePrincipal -ResourceGroup test -Mode Restricted -Confirm:$false } 'context mismatch'
+        Assert-NoWrites
+    }
+    Write-Output 'PASS: identity and subscription failures prevent NSG writes, including identity changes after startup.'
+
+    . (Join-Path $root 'scripts\common\AzureCli.ps1')
+    $pinned = $servicePrincipal.Clone()
+    $pinned.ExpectedAzureConfigDir = $temporary
+    Reset-State 'normal' -AuthenticationType servicePrincipal
+    $env:AZURE_CONFIG_DIR = [IO.Path]::GetTempPath()
+    Assert-Failure { Invoke-HandsonAz -ExpectedContext $pinned -Arguments @('network','nsg','rule','update') } 'cache changed'
+    Assert-NoWrites
+    $env:AZURE_CONFIG_DIR = $null
+    Assert-Failure { & $phase @servicePrincipal -ResourceGroup test -Mode Restricted -Confirm:$false } 'AZURE_CONFIG_DIR'
+    Assert-NoWrites
+    $env:AZURE_CONFIG_DIR = $temporary
+    Write-Output 'PASS: missing or changed authentication cache prevents writes.'
+
+    $ghCmd = "@echo off`r`necho Synthetic GitHub authentication stop 1>&2`r`nexit /b 8`r`n"
+    Set-Content -LiteralPath (Join-Path $temporary 'gh.cmd') -Value $ghCmd -Encoding ascii
+    function Read-Host {
+        param([string]$Prompt)
+        if ($Prompt -like 'Type the full VM name*') { return 'arclab-hyperv' }
+        return ''
+    }
+    $deploy = Join-Path $root 'infra\lab\Deploy-Lab.ps1'
+    $deployArguments = @{TenantId=$tenant; SubscriptionId=$subscription; ResourceGroupName='rg-test'; ClientId=$client}
+    Reset-State 'normal' -AuthenticationType servicePrincipal
+    Assert-Failure { & $deploy @deployArguments } 'GitHub sign-in failed'
+    Assert-NoWrites
+    $calls = Get-Content -LiteralPath (Join-Path $temporary 'calls.jsonl') -Raw
+    if ($calls -match '"login"|"list"|"set"') { throw 'Service principal path must not log in or change the subscription.' }
+    Write-Output 'PASS: deployment accepts the approved service principal without login or account selection.'
+
+    Reset-State 'normal' -AuthenticationType servicePrincipal
+    $env:AZURE_CONFIG_DIR = $null
+    Assert-Failure { & $deploy @deployArguments } 'AZURE_CONFIG_DIR'
+    Assert-NoWrites
+    $env:AZURE_CONFIG_DIR = $temporary
+    foreach ($mode in 'mismatch', 'subscription-mismatch', 'client-mismatch', 'type-mismatch', 'disabled', 'account-failure') {
+        Reset-State $mode -AuthenticationType servicePrincipal
+        $message = if ($mode -eq 'account-failure') { 'Azure CLI failed' } else { 'context mismatch' }
+        Assert-Failure { & $deploy @deployArguments } $message
+        Assert-NoWrites
+        $calls = Get-Content -LiteralPath (Join-Path $temporary 'calls.jsonl') -Raw
+        if ($calls -match '"login"|"set"') { throw 'Failed service principal validation must not switch authentication.' }
+    }
+    foreach ($key in 'TenantId', 'SubscriptionId') {
+        Reset-State 'normal' -AuthenticationType servicePrincipal
+        $missing = $deployArguments.Clone()
+        $missing.Remove($key)
+        Assert-Failure { & $deploy @missing } 'explicit non-empty'
+        Assert-NoWrites
+    }
+    $emptyClient = $deployArguments.Clone()
+    $emptyClient.ClientId = [guid]::Empty
+    Assert-Failure { & $deploy @emptyClient } 'explicit non-empty'
+    Write-Output 'PASS: deployment rejects invalid identity, missing IDs and unauthenticated contexts without login or writes.'
+
+    Reset-State 'normal'
+    $userArguments = $deployArguments.Clone()
+    $userArguments.Remove('ClientId')
+    Assert-Failure { & $deploy @userArguments } 'GitHub sign-in failed'
+    $calls = Get-Content -LiteralPath (Join-Path $temporary 'calls.jsonl') -Raw
+    if ($calls -notmatch '"set"') { throw 'Existing user path did not select the approved subscription.' }
+    Reset-State 'normal' -AuthenticationType servicePrincipal
+    Assert-Failure { & $deploy @userArguments } 'interactive Azure CLI login'
+    Assert-NoWrites
+    Write-Output 'PASS: existing user login remains available and does not implicitly accept a service principal.'
+
+    $guest = Join-Path $root 'infra\lab\Invoke-LabGuest.ps1'
+    Reset-State 'normal' -AuthenticationType servicePrincipal
+    $null = & $guest -TenantId $tenant -SubscriptionId $subscription -ClientId $client -ResourceGroupName test -Action RestartHyperV
+    $calls = Get-Content -LiteralPath (Join-Path $temporary 'calls.jsonl') -Raw
+    if ($calls -notmatch '"restart"') { throw 'Approved service principal guest restart was not requested.' }
+    Reset-State 'client-mismatch' -AuthenticationType servicePrincipal
+    Assert-Failure { & $guest -TenantId $tenant -SubscriptionId $subscription -ClientId $client -ResourceGroupName test -Action RestartHyperV } 'context mismatch'
+    Assert-NoWrites
+    Reset-State 'identity-changed' -AuthenticationType servicePrincipal
+    Assert-Failure { & $guest -TenantId $tenant -SubscriptionId $subscription -ClientId $client -ResourceGroupName test -Action RestartHyperV } 'context mismatch'
+    Assert-NoWrites
+    Write-Output 'PASS: guest operations accept the approved service principal and recheck identity after approval.'
 } finally {
     $env:PATH = $previousPath
     $env:HANDSON_TEST_STATE_DIR = $previousState
-    foreach ($name in 'az.cmd', 'fake-az.ps1', 'state.json', 'calls.jsonl') {
+    $env:AZURE_CONFIG_DIR = $previousConfigDir
+    foreach ($name in 'az.cmd', 'gh.cmd', 'fake-az.ps1', 'state.json', 'calls.jsonl') {
         $file = Join-Path $temporary $name
         if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file -Force }
     }

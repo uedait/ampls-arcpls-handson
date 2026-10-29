@@ -22,6 +22,7 @@ $password = ConvertTo-SecureString ('OnlySynthetic-' + [guid]::NewGuid().ToStrin
 $context = @{
     RunId=('a' * 32); TenantId='11111111-1111-1111-1111-111111111111'
     SubscriptionId='22222222-2222-2222-2222-222222222222'; ResourceGroup='rg-test'; Prefix='labtest'
+    AzureContext=@{ExpectedTenantId='11111111-1111-1111-1111-111111111111'; ExpectedSubscriptionId='22222222-2222-2222-2222-222222222222'}
     Location='japaneast'; WorkloadVmSize='Standard_D2s_v5'; DnsVmSize='Standard_D2s_v5'; HyperVVmSize='Standard_D8s_v5'
     Repository='uedait/ampls-arcpls-handson'; RunDirectory=$temporary
     Source=@{Root=$root; CommitSha=('b' * 40); ArchiveSha256=('c' * 64)}
@@ -89,6 +90,7 @@ try {
     }
 
     $originalManaged = ${function:Invoke-LabManagedCommand}
+    $originalRestricted = ${function:Set-LabRestrictedMode}
     function Invoke-LabArm {
         param($Context, $Method, $Path, $Body)
         if ($Method -eq 'PUT') {
@@ -119,19 +121,25 @@ try {
     $script:events = [Collections.Generic.List[string]]::new()
     $script:failure = ''
     $script:prepareCalls = 0
+    $script:clientId = '33333333-3333-3333-3333-333333333333'
+    $script:authenticationType = 'user'
     function Save-LabRunState {
         param($Context, $Stage, $Status, $Detail=@{})
         $script:events.Add("$Stage/$Status")
     }
     function Invoke-HandsonAz {
-        param($Arguments)
+        param($Arguments, $ExpectedContext)
+        if ($ExpectedContext) { Assert-HandsonAzContext @ExpectedContext }
         $line = $Arguments -join ' '
+        if ($line -like 'account show*') {
+            return @{tenantId=$context.TenantId; id=$context.SubscriptionId; state='Enabled'; user=@{type=$script:authenticationType; name=$script:clientId}}
+        }
         if ($line -like 'vm list-skus*') {
             $size = $Arguments[[array]::IndexOf($Arguments, '--size') + 1]
             return @(@{name=$size; resourceType='virtualMachines'; restrictions=@(); capabilities=@(@{name='HyperVGenerations';value='V1,V2'})})
         }
         if ($line -like 'group list*') { return @() }
-        if ($line -like 'group create*') { return @{name='rg-test'} }
+        if ($line -like 'group create*') { $script:events.Add('GroupCreated'); return @{name='rg-test'} }
         if ($line -like 'bicep build*') { return @{resources=@()} }
         if ($line -like 'network nic update*') { $script:events.Add('NicDns'); return @{name='nic'} }
         throw "Unexpected synthetic CLI request: $line"
@@ -171,6 +179,54 @@ try {
     Assert-Test ($script:events[$script:events.Count-1] -eq 'Complete/Succeeded') 'Completion is the final state.'
     Assert-Test ($script:deploymentBody.properties.parameters.adminPassword.value -eq $context.VmCredential.GetNetworkCredential().Password) 'VM password is handed to the in-memory secure ARM parameter.'
 
+    $previousConfigDir = $env:AZURE_CONFIG_DIR
+    try {
+        $env:AZURE_CONFIG_DIR = $temporary
+        $context.AzureContext.ExpectedClientId = $script:clientId
+        $context.AzureContext.ExpectedAzureConfigDir = $temporary
+        $script:authenticationType = 'servicePrincipal'
+        $result = Invoke-LabAutomation $context
+        Assert-Test ($result.Status -eq 'Succeeded') 'Service principal context completes the same controller phases.'
+
+        $legacy = Join-Path $temporary 'legacy'
+        $null = New-Item -ItemType Directory -Path (Join-Path $legacy 'infra\lab') -Force
+        Set-Content -LiteralPath (Join-Path $legacy 'infra\lab\Set-LabInternetAccess.ps1') -Value 'param()' -Encoding ascii
+        $sourceRoot = $context.Source.Root
+        $context.Source.Root = $legacy
+        $script:events.Clear()
+        Assert-Throws { Invoke-LabAutomation $context } 'Lab deployment stopped at ValidateInputs'
+        Assert-Test (-not $script:events.Contains('DeployResources/Running')) 'Legacy source is rejected before resource deployment.'
+        Assert-Test (-not $script:events.Contains('GroupCreated')) 'Legacy source is rejected before resource group creation.'
+        $phaseFixture = @'
+[CmdletBinding(SupportsShouldProcess)]
+param(
+    [guid]$ExpectedTenantId, [guid]$ExpectedSubscriptionId, [guid]$ExpectedClientId,
+    [string]$ResourceGroup, [string]$Prefix, [string]$Mode
+)
+@{
+    Tenant=$ExpectedTenantId.ToString(); Subscription=$ExpectedSubscriptionId.ToString()
+    Client=$ExpectedClientId.ToString(); Mode=$Mode
+} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $PSScriptRoot 'observed.json')
+'@
+        Set-Content -LiteralPath (Join-Path $legacy 'infra\lab\Set-LabInternetAccess.ps1') -Value $phaseFixture -Encoding ascii
+        & $originalRestricted -Context $context
+        $observedPath = Join-Path $legacy 'infra\lab\observed.json'
+        $observed = Get-Content -LiteralPath $observedPath -Raw | ConvertFrom-Json
+        Assert-Test ($observed.Client -eq $script:clientId -and $observed.Tenant -eq $context.TenantId -and
+            $observed.Subscription -eq $context.SubscriptionId -and $observed.Mode -eq 'Restricted') 'NSG script receives the approved service principal and resource context.'
+        Remove-Item -LiteralPath $observedPath
+        $env:AZURE_CONFIG_DIR = [IO.Path]::GetTempPath()
+        Assert-Throws { & $originalRestricted -Context $context } 'cache changed'
+        Assert-Test (-not (Test-Path -LiteralPath $observedPath)) 'Changed cache blocks NSG script execution.'
+        $env:AZURE_CONFIG_DIR = $temporary
+        $context.Source.Root = $sourceRoot
+    } finally {
+        $env:AZURE_CONFIG_DIR = $previousConfigDir
+        $context.AzureContext.Remove('ExpectedClientId')
+        $context.AzureContext.Remove('ExpectedAzureConfigDir')
+        $script:authenticationType = 'user'
+    }
+
     foreach ($failure in 'hyperv/StageSource', 'dns/InitializeDns', 'hyperv/BuildNested', 'workload/VerifyBuild', 'hyperv/VerifyRestricted') {
         $script:events.Clear()
         $script:failure = $failure
@@ -186,11 +242,11 @@ try {
     Write-Output "PASS: $checks controller, result-contract, archive and failure-order assertions."
 } finally {
     $password.Dispose()
-    foreach ($file in @('state.json','fixture.zip','good\root\readme.txt')) {
+    foreach ($file in @('state.json','fixture.zip','good\root\readme.txt','legacy\infra\lab\Set-LabInternetAccess.ps1','legacy\infra\lab\observed.json')) {
         $path = Join-Path $temporary $file
         if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
     }
-    foreach ($directory in @('good\root','good')) {
+    foreach ($directory in @('good\root','good','legacy\infra\lab','legacy\infra','legacy')) {
         $path = Join-Path $temporary $directory
         if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path }
     }

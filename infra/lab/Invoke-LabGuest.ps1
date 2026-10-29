@@ -6,23 +6,30 @@
 param(
     [Parameter(Mandatory)][guid]$TenantId,
     [Parameter(Mandatory)][guid]$SubscriptionId,
+    [guid]$ClientId,
     [Parameter(Mandatory)][string]$ResourceGroupName,
     [ValidatePattern('^[a-z][a-z0-9]{1,11}$')][string]$Prefix = 'arclab',
     [Parameter(Mandatory)]
     [ValidateSet('InitializeDns', 'InstallHyperV', 'RestartHyperV')][string]$Action
 )
 $ErrorActionPreference = 'Stop'
-$accountJson = & az account show --subscription "$SubscriptionId" --output json
-if ($LASTEXITCODE -ne 0) { throw 'Azure CLI account lookup failed.' }
-$account = $accountJson | ConvertFrom-Json
-if ($account.tenantId -ne "$TenantId" -or $account.id -ne "$SubscriptionId" -or
-    $account.state -ne 'Enabled' -or $account.user.type -ne 'user') {
-    throw 'Tenant, subscription or interactive user authentication mismatch.'
+$root = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+. (Join-Path $root 'scripts\common\AzureCli.ps1')
+$azContext = @{ExpectedTenantId=$TenantId; ExpectedSubscriptionId=$SubscriptionId}
+if ($PSBoundParameters.ContainsKey('ClientId')) {
+    $azContext.ExpectedClientId = $ClientId
+    $azContext.ExpectedAzureConfigDir = $env:AZURE_CONFIG_DIR
+}
+Assert-HandsonAzContext @azContext
+if (-not $PSBoundParameters.ContainsKey('ClientId')) {
+    $account = Invoke-HandsonAz -ExpectedContext $azContext -Arguments @('account', 'show', '--subscription', "$SubscriptionId")
+    if ($account.user.type -ne 'user') { throw 'Interactive user authentication required unless ClientId is specified.' }
 }
 $role = if ($Action -eq 'InitializeDns') { 'dns' } else { 'hyperv' }
 $vmName = "$Prefix-$role"
 Write-Host "Tenant: $TenantId / Subscription: $SubscriptionId / RG: $ResourceGroupName / VM: $vmName / Action: $Action"
 if ((Read-Host 'Type the full VM name to approve this operation') -ne $vmName) { throw 'Not approved.' }
+Assert-HandsonAzContext @azContext
 if ($Action -eq 'RestartHyperV') {
     & az vm restart --resource-group $ResourceGroupName --name $vmName --subscription "$SubscriptionId"
 }

@@ -29,7 +29,7 @@
 ## 2. 管理端末を準備する
 
 - PowerShell 7、Azure CLI、GitHub CLI と Bicep を用意してください。実行端末から Azure、GitHub API と codeload.github.com に HTTPS 接続できることを確認します。
-- Azure には、専用 RG の作成、ネットワーク・VM・Bastion・Resolver の作成、VM 再起動、Managed Run Command の作成・実行を許可された実施者のアカウントを使用します。
+- Azure には、専用 RG の作成、ネットワーク・VM・Bastion・Resolver の作成、VM 再起動、Managed Run Command の作成・実行を許可された実施者のアカウント、または証明書で事前認証したサービスプリンシパルを使用します。
 - Private リポジトリには、読み取り権限のある GitHub アカウントを使用します。サインインが必要な場合は、コマンドの案内に従い管理端末で対話認証してください。
 - 既定の L1 サイズ `Standard_D8s_v5` について、リージョンの提供状況、Gen2・Nested Virtualization 対応、容量とクォータを確認します。
 - Windows Server 評価版の利用条件に従って使用してください。既定の ISO はコードに定義した Microsoft 公式 Windows Server 2022 x64 英語評価版です。
@@ -52,11 +52,27 @@ Private リポジトリの長期 GitHub トークンは管理端末で使用し�
 .\infra\lab\Deploy-Lab.ps1
 ```
 
+### 証明書で認証したサービスプリンシパルを使う場合
+
+実施環境の認証手順で証明書による Azure CLI ログインと接続先の確認を済ませ、同じ PowerShell プロセスで専用の認証キャッシュと3つの ID を指定します。次の値は実施環境の値に置き換えてください。証明書、秘密鍵、認証キャッシュをリポジトリに保存しないでください。
+
+```powershell
+$env:AZURE_CONFIG_DIR = '<事前認証した専用キャッシュの絶対パス>'
+.\infra\lab\Deploy-Lab.ps1 `
+    -TenantId '<Tenant ID>' `
+    -SubscriptionId '<Subscription ID>' `
+    -ClientId '<サービスプリンシパルのクライアント ID>'
+```
+
+この実行では、スクリプトが再ログインやサブスクリプションの選択変更を行うことはありません。接続情報と実行 ID が一致しなければ停止します。証明書認証に対応したコミットを公開してから実行してください。認証の責任分担と再照合の詳細は[実行設計](automation.md#azure-の認証と接続先)を参照してください。
+
+### 構築内容を確認する
+
 対話では次の値を確認します。
 
 | 項目 | 既定値・方針 |
 |---|---|
-| サブスクリプション | Azure CLI で選択中の ID を既定として確認 |
+| サブスクリプション | 利用者ログインでは選択中の ID を既定として確認。サービスプリンシパルでは引数で指定した ID を照合 |
 | RG | `rg-arclab-lab`。新規または空の専用 RG |
 | 名前の接頭辞 | `arclab`。VM 名は `-workload`、`-dns`、`-hyperv` を付ける |
 | Azure VM の管理者 | 既定ユーザー名 `labadmin`。3台に使うパスワードを非表示で入力 |
@@ -77,6 +93,8 @@ ISO の URL・SHA-256・利用条件の確認を追加のヒアリング項目�
 ```
 
 実行中は段階名と状態を CLI に表示します。VM 内でスクリプトを手動実行する操作や、L1 の再起動ボタンの操作は、自動構築の通常手順には含めません。
+
+サービスプリンシパルで単独のゲスト操作を行う場合は `Invoke-LabGuest.ps1` に `-TenantId`、`-SubscriptionId`、`-ClientId` を指定します。`Set-LabInternetAccess.ps1` では `-ExpectedTenantId`、`-ExpectedSubscriptionId`、`-ExpectedClientId` を指定します。いずれも事前認証した専用の `AZURE_CONFIG_DIR` が必要です。操作内容の承認は各スクリプトで別途行います。
 
 ## 4. 自動構築される内容
 

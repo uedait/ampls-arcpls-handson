@@ -11,9 +11,8 @@ function Invoke-LabArm {
     if (-not $Path.StartsWith("/subscriptions/$($Context.SubscriptionId)/", [StringComparison]::OrdinalIgnoreCase)) {
         throw 'ARM request does not match the approved subscription.'
     }
-    Assert-HandsonAzContext -ExpectedTenantId $Context.TenantId -ExpectedSubscriptionId $Context.SubscriptionId
     $token = Invoke-HandsonAz -Arguments @('account', 'get-access-token',
-        '--resource', 'https://management.azure.com/', '--subscription', $Context.SubscriptionId)
+        '--resource', 'https://management.azure.com/', '--subscription', $Context.SubscriptionId) -ExpectedContext $Context.AzureContext
     if ($token.tenant -ne $Context.TenantId -or $token.subscription -ne $Context.SubscriptionId -or -not $token.accessToken) {
         throw 'ARM token context mismatch.'
     }
@@ -295,7 +294,8 @@ function Invoke-LabRoleAction {
 function Restart-LabVm {
     param([hashtable]$Context, [string]$Role)
     $vm = "$($Context.Prefix)-$Role"
-    Assert-HandsonAzContext -ExpectedTenantId $Context.TenantId -ExpectedSubscriptionId $Context.SubscriptionId
+    $azContext = $Context.AzureContext
+    Assert-HandsonAzContext @azContext
     & az vm restart --resource-group $Context.ResourceGroup --name $vm `
         --subscription $Context.SubscriptionId --only-show-errors --output none
     if ($LASTEXITCODE -ne 0) { throw "VM restart failed for $vm." }
@@ -304,9 +304,15 @@ function Restart-LabVm {
 
 function Set-LabRestrictedMode {
     param([hashtable]$Context)
+    $azContext = $Context.AzureContext
+    Assert-HandsonAzContext @azContext
+    $authentication = @{}
+    if ($Context.AzureContext.ContainsKey('ExpectedClientId')) {
+        $authentication.ExpectedClientId = $Context.AzureContext.ExpectedClientId
+    }
     & (Join-Path $Context.Source.Root 'infra\lab\Set-LabInternetAccess.ps1') `
         -ExpectedTenantId $Context.TenantId -ExpectedSubscriptionId $Context.SubscriptionId `
-        -ResourceGroup $Context.ResourceGroup -Prefix $Context.Prefix -Mode Restricted -Confirm:$false | Out-Host
+        -ResourceGroup $Context.ResourceGroup -Prefix $Context.Prefix -Mode Restricted -Confirm:$false @authentication | Out-Host
 }
 
 function Get-LabDeploymentTemplate {
@@ -328,22 +334,30 @@ function Invoke-LabAutomation {
     $stage = 'ValidateInputs'
     try {
         Save-LabRunState $Context $stage 'Running'
+        $azContext = $Context.AzureContext
+        Assert-HandsonAzContext @azContext
+        if ($Context.AzureContext.ContainsKey('ExpectedClientId')) {
+            $phaseScript = Get-Command -Name (Join-Path $Context.Source.Root 'infra\lab\Set-LabInternetAccess.ps1') -ErrorAction Stop
+            if (-not $phaseScript.Parameters.ContainsKey('ExpectedClientId')) {
+                throw 'Published commit does not support service principal authentication. Publish the authentication revision before deploying.'
+            }
+        }
         $subscription = @('--subscription', $Context.SubscriptionId)
         foreach ($size in @($Context.WorkloadVmSize, $Context.DnsVmSize, $Context.HyperVVmSize) | Select-Object -Unique) {
             $skus = @(Invoke-HandsonAz -Arguments (@('vm', 'list-skus', '--location', $Context.Location,
-                '--size', $size, '--all') + $subscription))
+                '--size', $size, '--all') + $subscription) -ExpectedContext $Context.AzureContext)
             $sku = @($skus | Where-Object { $_.name -eq $size -and $_.resourceType -eq 'virtualMachines' })
             if ($sku.Count -ne 1 -or @($sku[0].restrictions).Count -gt 0) { throw "VM size is unavailable or restricted: $size." }
             if (@($sku[0].capabilities | Where-Object { $_.name -eq 'HyperVGenerations' -and $_.value -match 'V2' }).Count -ne 1) {
                 throw "Gen2 is unavailable for $size."
             }
         }
-        $groups = @(Invoke-HandsonAz -Arguments (@('group', 'list') + $subscription))
+        $groups = @(Invoke-HandsonAz -Arguments (@('group', 'list') + $subscription) -ExpectedContext $Context.AzureContext)
         if (@($groups | Where-Object { $_.name -eq $Context.ResourceGroup }).Count -gt 0) {
-            $existing = @(Invoke-HandsonAz -Arguments (@('resource', 'list', '--resource-group', $Context.ResourceGroup) + $subscription))
+            $existing = @(Invoke-HandsonAz -Arguments (@('resource', 'list', '--resource-group', $Context.ResourceGroup) + $subscription) -ExpectedContext $Context.AzureContext)
             if ($existing.Count -gt 0) { throw 'Use a new or empty lab resource group; automatic resume over resources is not supported.' }
         } else {
-            $null = Invoke-HandsonAz -Arguments (@('group', 'create', '--name', $Context.ResourceGroup, '--location', $Context.Location) + $subscription)
+            $null = Invoke-HandsonAz -Arguments (@('group', 'create', '--name', $Context.ResourceGroup, '--location', $Context.Location) + $subscription) -ExpectedContext $Context.AzureContext
         }
         $stage = 'DeployResources'
         Save-LabRunState $Context $stage 'Running'
@@ -383,7 +397,7 @@ function Invoke-LabAutomation {
         foreach ($role in 'dns', 'hyperv') {
             $null = Invoke-HandsonAz -Arguments (@('network', 'nic', 'update',
                 '--resource-group', $Context.ResourceGroup, '--name', "$($Context.Prefix)-$role-nic",
-                '--dns-servers', '10.30.1.5') + $subscription)
+                '--dns-servers', '10.30.1.5') + $subscription) -ExpectedContext $Context.AzureContext
         }
         $stage = 'PrepareHyperV'
         Save-LabRunState $Context $stage 'Running'

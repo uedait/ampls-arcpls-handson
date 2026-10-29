@@ -3,6 +3,7 @@
 param(
     [Parameter(Mandatory)][guid]$ExpectedTenantId,
     [Parameter(Mandatory)][guid]$ExpectedSubscriptionId,
+    [guid]$ExpectedClientId,
     [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$ResourceGroup,
     [ValidatePattern('^[a-z][a-z0-9]{1,11}$')][string]$Prefix = 'arclab',
     [Parameter(Mandatory)][ValidateSet('Build', 'Restricted')][string]$Mode
@@ -12,7 +13,12 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $root = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 . (Join-Path $root 'scripts\common\AzureCli.ps1')
-Assert-HandsonAzContext -ExpectedTenantId $ExpectedTenantId -ExpectedSubscriptionId $ExpectedSubscriptionId
+$azContext = @{ExpectedTenantId=$ExpectedTenantId; ExpectedSubscriptionId=$ExpectedSubscriptionId}
+if ($PSBoundParameters.ContainsKey('ExpectedClientId')) {
+    $azContext.ExpectedClientId = $ExpectedClientId
+    $azContext.ExpectedAzureConfigDir = $env:AZURE_CONFIG_DIR
+}
+Assert-HandsonAzContext @azContext
 $scope = @('--resource-group', $ResourceGroup, '--subscription', $ExpectedSubscriptionId.ToString())
 $access = if ($Mode -eq 'Restricted') { 'Deny' } else { 'Allow' }
 $roles = @(
@@ -22,11 +28,11 @@ $roles = @(
 )
 $targets = foreach ($role in $roles) {
     $name = "$Prefix-$($role.Name)"
-    $group = Invoke-HandsonAz -Arguments (@('network', 'nsg', 'show', '--name', "$name-nsg") + $scope)
+    $group = Invoke-HandsonAz -ExpectedContext $azContext -Arguments (@('network', 'nsg', 'show', '--name', "$name-nsg") + $scope)
     if ($group.tags.purpose -ne 'optional-ampls-arcpls-lab') {
         throw "Unexpected owner tag on $name-nsg. No NSGs were changed."
     }
-    $nic = Invoke-HandsonAz -Arguments (@('network', 'nic', 'show', '--name', "$name-nic") + $scope)
+    $nic = Invoke-HandsonAz -ExpectedContext $azContext -Arguments (@('network', 'nic', 'show', '--name', "$name-nic") + $scope)
     if ($nic.networkSecurityGroup.id -ne $group.id -or
         $nic.virtualMachine.id -ne "/subscriptions/$ExpectedSubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.Compute/virtualMachines/$name" -or
         @($nic.ipConfigurations | Where-Object { $_.privateIPAddress -eq $role.Ip }).Count -ne 1) {
@@ -76,9 +82,9 @@ foreach ($target in $targets) {
         continue
     }
     try {
-        $null = Invoke-HandsonAz -Arguments (@('network', 'nsg', 'rule', 'update',
+        $null = Invoke-HandsonAz -ExpectedContext $azContext -Arguments (@('network', 'nsg', 'rule', 'update',
             '--nsg-name', $target.Name, '--name', 'LabInternetOutbound', '--access', $access) + $scope)
-        $after = Invoke-HandsonAz -Arguments (@('network', 'nsg', 'rule', 'show',
+        $after = Invoke-HandsonAz -ExpectedContext $azContext -Arguments (@('network', 'nsg', 'rule', 'show',
             '--nsg-name', $target.Name, '--name', 'LabInternetOutbound') + $scope)
         if ($after.access -ne $access -or $after.direction -ne 'Outbound' -or
             $after.destinationAddressPrefix -ne 'Internet' -or $after.priority -ne 400) {
