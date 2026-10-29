@@ -126,19 +126,6 @@ resource nsg 'Microsoft.Network/networkSecurityGroups@2023-11-01' = {
         }
       }
       {
-        name: 'AllowHostImds'
-        properties: {
-          priority: 140
-          direction: 'Outbound'
-          access: 'Allow'
-          protocol: 'Tcp'
-          sourceAddressPrefix: '*'
-          sourcePortRange: '*'
-          destinationAddressPrefix: 'AzurePlatformIMDS'
-          destinationPortRange: '80'
-        }
-      }
-      {
         name: 'LabInternetOutbound'
         properties: {
           priority: 400

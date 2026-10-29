@@ -52,6 +52,12 @@ else {
                 continue
             }
             $rules = @($vmNsgs[0].properties.securityRules)
+            if (@($rules | Where-Object {
+                $_.properties.destinationAddressPrefix -eq 'AzurePlatformIMDS' -or
+                @($_.properties.destinationAddressPrefixes) -contains 'AzurePlatformIMDS'
+            }).Count -gt 0) {
+                $failures.Add('Host IMDS must retain the platform default without an AzurePlatformIMDS NSG rule.')
+            }
             $expected = @{
                 AllowBastionRdp = @{ priority=100; direction='Inbound'; access='Allow'; protocol='Tcp'; sourceAddressPrefix='10.20.3.0/26'; destinationPortRange='3389' }
                 DenyOtherRdp = @{ priority=150; direction='Inbound'; access='Deny'; sourceAddressPrefix='*'; destinationPortRange='3389' }

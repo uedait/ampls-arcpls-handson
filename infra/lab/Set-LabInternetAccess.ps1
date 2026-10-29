@@ -47,7 +47,7 @@ $targets = foreach ($role in $roles) {
         throw "Unexpected LabInternetOutbound rule on $name-nsg. No NSGs were changed."
     }
     $expectedOutbound = @('AllowDnsTcp', 'AllowDnsUdp', 'AllowPrivateEndpoints',
-        'AllowExplicitProxy', 'AllowAzureWireServer', 'AllowHostImds', 'LabInternetOutbound')
+        'AllowExplicitProxy', 'AllowAzureWireServer', 'LabInternetOutbound')
     if (@($group.securityRules | Where-Object {
         $_.direction -eq 'Outbound' -and $_.name -notin $expectedOutbound
     }).Count -gt 0) {

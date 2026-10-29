@@ -56,6 +56,7 @@ Inbound endpoint が配置された hub VNet に zone をリンクします。�
 
 疑似環境では Azure VM 内に Hyper-V を構成し、その L2 ゲストだけを Arc に登録します。
 L1 ホストは Azure VM として管理します。L2 は Internal vSwitch と WinNAT を使用し、Azure / Azure Local IMDS への接続を遮断します。
+Azure VM の IMDS 通信は既定では NSG の制限対象外です。IMDS の許可を目的とする NSG 規則は追加しません。`AzurePlatformIMDS` タグは既定の通信を拒否する場合に使用するタグであり、`Allow` 規則には使用できません。L2 の IMDS 遮断は L2 内の Windows Firewall で行い、L1 の IMDS 通信は維持します。
 この構成は Azure 内の評価用です。本番環境への適用時は、実際のサーバーと接続方式に合わせて設計してください。
 
 講師用の管理接続には hub の `AzureBastionSubnet`（`10.20.3.0/26`）へ Bastion Standard をデプロイします。ブラウザーから3台の Azure VM を操作し、ファイル転送には有効化済みのネイティブ RDP 接続を使います。L2 は L1 の VMConnect / PowerShell Direct を使用してください。Firewall・Bastion・3台の VM が、それぞれ専用 Public IP を持ちます。VM の管理接続は Private IP 経由に統一します。

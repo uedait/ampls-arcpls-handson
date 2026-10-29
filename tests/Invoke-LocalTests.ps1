@@ -87,6 +87,9 @@ if ($line.StartsWith('network nsg show ')) {
     if ($state.mode -eq 'nsg-extra-rule') {
         $rules += @{ name='ExtraPublicAllow'; direction='Outbound'; access='Allow'; priority=300 }
     }
+    if ($state.mode -eq 'nsg-imds-allow') {
+        $rules += @{ name='AllowHostImds'; direction='Outbound'; access='Allow'; priority=140; destinationAddressPrefix='AzurePlatformIMDS' }
+    }
     $purpose = if ($state.mode -eq 'nsg-owner') { 'someone-else' } else { 'optional-ampls-arcpls-lab' }
     Return-Json @{ id="/subscriptions/$($state.subscription)/resourceGroups/test/providers/Microsoft.Network/networkSecurityGroups/$name"; tags=@{purpose=$purpose}; securityRules=$rules }
 }
@@ -219,6 +222,7 @@ try {
         @{Mode='nsg-nic'; Error='ownership mismatch'}
         @{Mode='nsg-priority'; Error='Unexpected LabInternetOutbound'}
         @{Mode='nsg-extra-rule'; Error='Additional outbound rules'}
+        @{Mode='nsg-imds-allow'; Error='Additional outbound rules'}
         @{Mode='mismatch'; Error='context mismatch'}
     )) {
         Reset-State $case.Mode
