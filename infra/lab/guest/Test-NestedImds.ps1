@@ -3,6 +3,10 @@
 [CmdletBinding()]
 param([Parameter(Mandatory)][guid]$ExpectedBiosGuid)
 $ErrorActionPreference = 'Stop'
+if (-not (Get-Command Test-NestedBlockedConnectError -CommandType Function -ErrorAction SilentlyContinue)) {
+    if (-not $PSScriptRoot) { throw 'The verified TCP failure classifier must be supplied to the remote check.' }
+    . (Join-Path $PSScriptRoot 'NestedIso.Helpers.ps1')
+}
 if ([guid](Get-CimInstance Win32_ComputerSystemProduct).UUID -ne $ExpectedBiosGuid -or
     -not (Get-NetIPAddress -AddressFamily IPv4 | Where-Object IPAddress -eq '192.168.100.10')) {
     throw 'L2 identity/IP check failed. Do not run IMDS configuration or tests on L1.'
@@ -25,8 +29,8 @@ foreach ($address in @('169.254.169.254', '169.254.169.253')) {
         $task = $client.ConnectAsync($address, 80)
         if ($task.Wait(3000)) { $connected = $client.Connected }
     }
-    catch [System.AggregateException] {
-        # A refused/blocked TCP connection is expected.
+    catch {
+        if (-not (Test-NestedBlockedConnectError $_)) { throw }
     }
     finally { $client.Dispose() }
     if ($connected) { throw "FAIL: L2 can connect to ${address}:80." }

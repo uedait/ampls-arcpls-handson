@@ -60,8 +60,8 @@ try {
     # PowerShell Direct never falls back to a host session or network remoting.
     Invoke-Command -VMName $VmName -Credential $credential -FilePath `
         (Join-Path $PSScriptRoot 'Set-NestedGuest.ps1') -ArgumentList "$biosGuid" -ErrorAction Stop
-    Invoke-Command -VMName $VmName -Credential $credential -FilePath `
-        (Join-Path $PSScriptRoot 'Test-NestedImds.ps1') -ArgumentList "$biosGuid" -ErrorAction Stop
+    Invoke-NestedValidationFile -VmName $VmName -Credential $credential -FilePath `
+        (Join-Path $PSScriptRoot 'Test-NestedImds.ps1') -Arguments @("$biosGuid")
 }
 catch {
     throw "Nested guest configuration/verification failed; resources were retained. Complete OOBE, confirm credentials and PowerShell Direct readiness, then rerun. $($_.Exception.Message)"

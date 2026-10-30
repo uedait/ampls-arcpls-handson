@@ -7,6 +7,10 @@ param(
     [bool]$Restricted = $false
 )
 $ErrorActionPreference = 'Stop'
+if (-not (Get-Command Test-NestedBlockedConnectError -CommandType Function -ErrorAction SilentlyContinue)) {
+    if (-not $PSScriptRoot) { throw 'The verified TCP failure classifier must be supplied to the remote check.' }
+    . (Join-Path $PSScriptRoot 'NestedIso.Helpers.ps1')
+}
 if ([guid](Get-CimInstance Win32_ComputerSystemProduct).UUID -ne $ExpectedBiosGuid -or
     (Get-NetIPAddress -AddressFamily IPv4 | Where-Object IPAddress -eq '10.30.1.4')) {
     throw 'L2 identity mismatch.'
@@ -50,9 +54,10 @@ foreach ($address in @('169.254.169.254', '169.254.169.253')) {
     $client = New-Object Net.Sockets.TcpClient
     try {
         $task = $client.ConnectAsync($address, 80)
-        try { [void]$task.Wait(3000) } catch [AggregateException] { }
+        [void]$task.Wait(3000)
         if ($client.Connected) { throw 'L2 IMDS connection succeeded.' }
     }
+    catch { if (-not (Test-NestedBlockedConnectError $_)) { throw } }
     finally { $client.Dispose() }
 }
 $names = @('Install-ArcAgent.ps1', 'Connect-ArcServer.ps1', 'Write-HandsonEvent.ps1')
@@ -83,9 +88,10 @@ if ($Restricted) {
         $client = New-Object Net.Sockets.TcpClient
         try {
             $task = $client.ConnectAsync($target, 443)
-            try { [void]$task.Wait(4000) } catch [AggregateException] { }
+            [void]$task.Wait(4000)
             if ($client.Connected) { throw 'L2 public TCP connection succeeded.' }
         }
+        catch { if (-not (Test-NestedBlockedConnectError $_)) { throw } }
         finally { $client.Dispose() }
     }
 }

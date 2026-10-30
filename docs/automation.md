@@ -69,7 +69,7 @@ Azure の管理者パスワードは secure パラメーターとして ARM の�
 
 - `PreviousRunDirectory`: 元の `state.json` と `approval.json` がある実行ディレクトリの絶対パス。
 - `ApprovedResourceIds`: 再利用を承認した既存リソースの完全な ID の配列。
-- `ResumeFrom`: `DeployResources`、`InitializeDns`、`BuildNested`、`CompleteNested` のいずれか。省略した場合は `DeployResources`。
+- `ResumeFrom`: `DeployResources`、`InitializeDns`、`BuildNested`、`CompleteNested`、`VerifyBuild` のいずれか。省略した場合は `DeployResources`。
 
 元の実行は指定した `ResumeFrom` で `Failed` になっている必要があります。元の実行記録と承認記録の Run ID、コミット、対象 RG、テナント、サブスクリプション、接頭辞、リージョン、取得元を照合します。新しい実行 ID を使い、元の実行記録と保存済み資格情報を上書きしません。復旧用スクリプトは、同じ Windows ユーザーと端末で元の資格情報を復号して同じ値を使用します。復号や再保存の照合に失敗した場合は変更前に停止し、別の資格情報へ自動的に切り替えません。
 
@@ -90,6 +90,10 @@ DNS 転送先の未設定は、初回構成時には正常な状態として扱�
 ゲスト側では `New-NestedLabFromIso.ps1 -UseDefaultMedia -ContinueExistingVm` の専用モードを使います。このモードで `UseDefaultMedia` を指定しても、ISO の取得やディスク作成は行いません。`ContinueExistingVm` を指定しない通常の実行は、既存 VM とゲストディレクトリを引き続き拒否します。
 
 PowerShell SDK の停止例外は、エラーストリームに加えて `InvocationStateInfo.Reason.ErrorRecord` も確認します。Microsoft が示す既知の英語の起動待ち transport エラーだけを期限内で再試行し、認証・権限・未知のエラーを再試行対象へ広げません。
+
+`VerifyBuild` は、L2 の設定完了後に再確認で停止した場合の検証専用経路です。元の BuildNested / Failed 記録を照合し、ソース再配置後に設定処理を呼ばず、VerifyBuild、Restricted、VerifyRestricted だけを実行します。ゲストの作成記録は Configured で、VM ID、BIOS GUID、ディスクと内部スイッチが一致し、応答ファイル削除・ライセンス確認が済んでいることを要求します。
+
+TCP 遮断試験では、実効規則と未接続の確認を維持します。同期例外と単一の非同期例外のどちらも、SocketException の AccessDenied、ConnectionRefused、TimedOut だけを既知の接続失敗として扱います。DNS の HostNotFound、経路不備、不明な例外、複数の集約例外を遮断成功として扱いません。L2 の確認スクリプトへは、検証済みソースの共通判定をメモリ内で渡し、L2 へ新しいファイルを配置しません。
 
 上記以外の段階からの再開、自動的な対象追加、自動削除はこの復旧経路に含めません。
 

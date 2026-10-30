@@ -432,9 +432,10 @@ function Assert-LabPublicBlocked {
         $client = New-Object Net.Sockets.TcpClient
         try {
             $task = $client.ConnectAsync($target, 443)
-            try { [void]$task.Wait(4000) } catch [AggregateException] { }
+            [void]$task.Wait(4000)
             if ($client.Connected) { throw 'Fresh public TCP connection succeeded.' }
         }
+        catch { if (-not (Test-NestedBlockedConnectError $_)) { throw } }
         finally { $client.Dispose() }
     }
 }
@@ -449,6 +450,13 @@ function Get-LabNestedChecks {
     $vm = Get-VM -Name 'ArcOnpremL2' -ErrorAction Stop
     if ($vm.State -ne 'Running' -or $vm.Generation -ne 2) { throw 'L2 VM not ready.' }
     $biosGuid = Get-NestedVmBiosGuid -VmId $vm.Id
+    $childPath='C:\NestedIsoGuests\ArcOnpremL2\ArcOnpremL2.vhdx'
+    $record=Get-Content -LiteralPath 'C:\NestedIsoGuests\ArcOnpremL2\deployment.json' -Raw | ConvertFrom-Json
+    $drives=@(Get-VMHardDiskDrive -VMName $vm.Name)
+    $adapters=@(Get-VMNetworkAdapter -VMName $vm.Name)
+    $disk=Get-VHD -Path $childPath
+    Assert-NestedContinuationLayout -Vm $vm -State $record -Drives $drives -Adapters $adapters `
+        -Disk $disk -BiosGuid $biosGuid -VmName 'ArcOnpremL2' -ChildPath $childPath -Configured
     $hashes = @{}
     foreach ($name in @('Install-ArcAgent.ps1','Connect-ArcServer.ps1','Write-HandsonEvent.ps1')) {
         $hashes[$name] = (Get-FileHash -LiteralPath (Join-Path $Package "scripts\$name") -Algorithm SHA256).Hash
@@ -458,8 +466,8 @@ function Get-LabNestedChecks {
     try {
         $direct = Wait-NestedDirect -VmName $vm.Name -Credential $Credential -TimeoutSeconds 120
         $session = $direct.Session
-        $checks = @(Invoke-Command -Session $session -FilePath (Join-Path $Package 'infra\lab\guest\Test-LabNestedReadiness.ps1') `
-            -ArgumentList "$biosGuid", $hashes, $Restricted -ErrorAction Stop)
+        $checks = @(Invoke-NestedValidationFile -Session $session -FilePath (Join-Path $Package 'infra\lab\guest\Test-LabNestedReadiness.ps1') `
+            -Arguments @("$biosGuid", $hashes, $Restricted))
         if ($checks.Count -ne 1 -or -not $checks[0].NestedReady) { throw 'Unexpected nested verification result.' }
         foreach ($key in @('NestedReady','IdentityReady','NetworkReady','DnsReady','ImdsBlocked','HandoverFilesReady','Licensed')) {
             if ($checks[0].$key -isnot [bool] -or -not $checks[0].$key) { throw 'Nested public check did not pass.' }

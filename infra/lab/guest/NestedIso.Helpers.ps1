@@ -138,15 +138,63 @@ function Get-NestedVmBiosGuid {
     return $biosGuid
 }
 
+function Test-NestedBlockedConnectError {
+    param([Parameter(Mandatory)][Management.Automation.ErrorRecord]$Failure)
+    $exception=$Failure.Exception
+    while ($exception -is [Management.Automation.RuntimeException] -and $exception.InnerException) {
+        $exception=$exception.InnerException
+    }
+    if ($exception -is [AggregateException]) {
+        $inner=@($exception.Flatten().InnerExceptions)
+        if ($inner.Count -ne 1) { return $false }
+        $exception=$inner[0]
+    }
+    return ($exception -is [Net.Sockets.SocketException] -and
+        $exception.SocketErrorCode -in @([Net.Sockets.SocketError]::AccessDenied,
+            [Net.Sockets.SocketError]::ConnectionRefused,[Net.Sockets.SocketError]::TimedOut))
+}
+
+function Invoke-NestedValidationFile {
+    [CmdletBinding(DefaultParameterSetName='Session')]
+    param(
+        [Parameter(Mandatory,ParameterSetName='Session')][Management.Automation.Runspaces.PSSession]$Session,
+        [Parameter(Mandatory,ParameterSetName='Vm')][string]$VmName,
+        [Parameter(Mandatory,ParameterSetName='Vm')][pscredential]$Credential,
+        [Parameter(Mandatory)][string]$FilePath,
+        [object[]]$Arguments=@()
+    )
+    $source=[IO.File]::ReadAllText($FilePath)
+    $definition='function Test-NestedBlockedConnectError { ' + ${function:Test-NestedBlockedConnectError}.ToString() + ' }'
+    $invoke=@{
+        ScriptBlock={
+            param($Source,$Definition,$FileArguments)
+            . ([scriptblock]::Create($Definition))
+            & ([scriptblock]::Create($Source)) @FileArguments
+        }
+        ArgumentList=@($source,$definition,$Arguments)
+        ErrorAction='Stop'
+    }
+    if ($PSCmdlet.ParameterSetName -eq 'Session') { $invoke.Session=$Session }
+    else { $invoke.VMName=$VmName; $invoke.Credential=$Credential }
+    Invoke-Command @invoke
+}
+
 function Assert-NestedContinuationLayout {
     param(
         [object]$Vm, [object]$State, [object[]]$Drives, [object[]]$Adapters, [object]$Disk,
-        [guid]$BiosGuid, [string]$VmName, [string]$ChildPath
+        [guid]$BiosGuid, [string]$VmName, [string]$ChildPath, [switch]$Configured
     )
     $recordVmId=[guid]::Empty
     $recordBios=[guid]::Empty
-    if ($State.Status -ne 'Failed' -or $State.FailureStage -ne 'PowerShellDirectReadiness' -or
-        $State.VmName -ne $VmName -or $State.ChildPath -ne $ChildPath -or
+    if ($Configured) {
+        if ($State.Status -ne 'Configured' -or $State.AnswerFilesRemoved -ne $true -or
+            $State.ActivationChecked -ne $true -or $State.InternetDenyReady -ne $true) {
+            throw 'Verification requires the completed nested VM creation record.'
+        }
+    } elseif ($State.Status -ne 'Failed' -or $State.FailureStage -ne 'PowerShellDirectReadiness') {
+        throw 'Existing nested VM continuation requires the matching failed connection-readiness record.'
+    }
+    if ($State.VmName -ne $VmName -or $State.ChildPath -ne $ChildPath -or
         -not [guid]::TryParse([string]$State.VmId,[ref]$recordVmId) -or $recordVmId -eq [guid]::Empty -or
         -not [guid]::TryParse([string]$State.BiosGuid,[ref]$recordBios) -or $recordBios -eq [guid]::Empty) {
         throw 'Existing nested VM continuation requires the matching failed connection-readiness record.'

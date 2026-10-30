@@ -377,6 +377,17 @@ try {
     $priorCompletion | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $previousStatePath
     $result = Invoke-LabAutomation -Context $context -Recovery $completionRecovery
     Assert-Test ($result.Status -eq 'Succeeded') 'A recorded failed completion can retry only through the explicit completion mode.'
+    $verificationRecovery=$completionRecovery.Clone()
+    $verificationRecovery.ResumeFrom='VerifyBuild'
+    $script:events.Clear()
+    $result=Invoke-LabAutomation -Context $context -Recovery $verificationRecovery
+    Assert-Test ($result.Status -eq 'Succeeded' -and $script:events.Contains('hyperv/VerifyBuild') -and
+        $script:events.Contains('RestrictionApplied') -and $script:events.Contains('hyperv/VerifyRestricted')) 'Verification-only recovery still performs build checks and final restricted checks.'
+    Assert-Test (-not $script:events.Contains('hyperv/CompleteNested') -and
+        -not $script:events.Contains('hyperv/BuildNested') -and
+        -not $script:events.Contains('ResourceDeploymentRequested') -and
+        -not $script:events.Contains('dns/InitializeDns') -and
+        -not $script:events.Contains('hyperv/PrepareHyperV')) 'Verification-only recovery cannot repeat OS or foundation configuration.'
     $previousRecord | ConvertTo-Json | Set-Content -LiteralPath $previousStatePath
     $script:groupExists = $false
     $script:existingResources = @()
@@ -408,6 +419,10 @@ try {
         $result = Invoke-LabAutomation -Context $context -Recovery $completionRecovery
         Assert-Test ($result.Status -eq 'Succeeded' -and $script:events.Contains('hyperv/CompleteNested') -and
             -not $script:events.Contains('hyperv/BuildNested')) 'Service principal completion selects the existing-VM action only.'
+        $script:events.Clear()
+        $result=Invoke-LabAutomation -Context $context -Recovery $verificationRecovery
+        Assert-Test ($result.Status -eq 'Succeeded' -and -not $script:events.Contains('hyperv/CompleteNested') -and
+            $script:events.Contains('hyperv/VerifyRestricted')) 'Service principal verification-only recovery preserves the identity guard without OS setup.'
         $previousRecord | ConvertTo-Json | Set-Content -LiteralPath $previousStatePath
         $script:groupExists = $false
         $script:existingResources = @()

@@ -208,8 +208,8 @@ try {
     $stage = 'GuestNetworkAndImds'
     Invoke-Command -Session $session -FilePath (Join-Path $PSScriptRoot 'Set-NestedGuest.ps1') `
         -ArgumentList "$biosGuid" -ErrorAction Stop
-    Invoke-Command -Session $session -FilePath (Join-Path $PSScriptRoot 'Test-NestedImds.ps1') `
-        -ArgumentList "$biosGuid" -ErrorAction Stop
+    Invoke-NestedValidationFile -Session $session -FilePath (Join-Path $PSScriptRoot 'Test-NestedImds.ps1') `
+        -Arguments @("$biosGuid")
     $stage = 'HandoverScripts'
     $scriptsDirectory = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\..\scripts'))
     $hashes = @{}
@@ -250,8 +250,8 @@ try {
         throw 'Windows is not Licensed (LicenseStatus=1). Internet deny is not permitted.'
     }
     $stage = 'BuildReadiness'
-    $readiness = Invoke-Command -Session $session -FilePath (Join-Path $PSScriptRoot 'Test-LabNestedReadiness.ps1') `
-        -ArgumentList "$biosGuid", $hashes, $false -ErrorAction Stop
+    $readiness = Invoke-NestedValidationFile -Session $session -FilePath (Join-Path $PSScriptRoot 'Test-LabNestedReadiness.ps1') `
+        -Arguments @("$biosGuid", $hashes, $false)
     if (-not $readiness.NestedReady) { throw 'L2 readiness failed.' }
     $state.BiosGuid = "$biosGuid"
     $state['HandoverHashes'] = $hashes

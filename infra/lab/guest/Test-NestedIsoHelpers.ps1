@@ -1,5 +1,5 @@
 #requires -Version 5.1
-# No Pester, administrator rights, network, Hyper-V, or disk writes required.
+# No Pester, administrator rights, network or Hyper-V. One temporary fixture is removed.
 [CmdletBinding()]
 param()
 $ErrorActionPreference = 'Stop'
@@ -111,6 +111,45 @@ foreach ($mode in @('missing','multiple','wrong-vm','snapshot','bad-guid','empty
     Assert-Throws { Invoke-TestBiosLookup $mode } 'Reject missing, ambiguous or mismatched BIOS identity without fallback'
 }
 Assert-Throws { Get-NestedVmBiosGuid -VmId ([guid]::Empty) } 'Reject an empty VM ID before CIM lookup'
+foreach ($code in @(10013,10060,10061,11001,10051,10022)) {
+    $socket=[Net.Sockets.SocketException]::new($code)
+    $expected=$code -in @(10013,10060,10061)
+    $record=[Management.Automation.ErrorRecord]::new($socket,'SyntheticSocket',[Management.Automation.ErrorCategory]::ConnectionError,$null)
+    Assert-True ((Test-NestedBlockedConnectError $record) -eq $expected) 'Synchronous socket failures are classified by known connection error codes only'
+    $aggregate=[AggregateException]::new($socket)
+    $wrapped=[Management.Automation.RuntimeException]::new('Synthetic method wrapper',$aggregate)
+    $record=[Management.Automation.ErrorRecord]::new($wrapped,'SyntheticWait',[Management.Automation.ErrorCategory]::ConnectionError,$null)
+    Assert-True ((Test-NestedBlockedConnectError $record) -eq $expected) 'Asynchronous socket failures use the same narrow classification'
+}
+$multiple=[AggregateException]::new([Exception[]]@(
+    [Net.Sockets.SocketException]::new(10013),[InvalidOperationException]::new('Unknown failure')))
+$record=[Management.Automation.ErrorRecord]::new($multiple,'SyntheticMultiple',[Management.Automation.ErrorCategory]::NotSpecified,$null)
+Assert-True (-not (Test-NestedBlockedConnectError $record)) 'Multiple aggregate failures are not converted into a passing block check'
+$record=[Management.Automation.ErrorRecord]::new([InvalidOperationException]::new('Unknown failure'),'SyntheticUnknown',[Management.Automation.ErrorCategory]::NotSpecified,$null)
+Assert-True (-not (Test-NestedBlockedConnectError $record)) 'Unknown failures remain errors'
+$fixture=Join-Path ([IO.Path]::GetTempPath()) ('nested-validation-' + [guid]::NewGuid().ToString('N') + '.ps1')
+$fixtureCredential=$null
+try {
+    [IO.File]::WriteAllText($fixture,'param([guid]$Identity,[hashtable]$Hashes,[bool]$Restricted) [pscustomobject]@{Identity=$Identity; HashCount=$Hashes.Count; Restricted=$Restricted; ClassifierPresent=($null -ne (Get-Command Test-NestedBlockedConnectError -CommandType Function -ErrorAction Stop))}',[Text.UTF8Encoding]::new($false))
+    $fixtureCredential=[pscredential]::new('Synthetic',(ConvertTo-SecureString 'SyntheticOnly-123!' -AsPlainText -Force))
+    $transport=& {
+        param($Definition,$Path,$Credential)
+        function Invoke-Command {
+            [CmdletBinding()]
+            param($VMName,$Credential,$ScriptBlock,[object[]]$ArgumentList)
+            if ($VMName -ne 'SyntheticVm' -or $null -eq $Credential) { throw 'Unexpected validation transport target' }
+            & $ScriptBlock @ArgumentList
+        }
+        . ([scriptblock]::Create($Definition))
+        Invoke-NestedValidationFile -VmName SyntheticVm -Credential $Credential -FilePath $Path `
+            -Arguments @([guid]'11111111-1111-1111-1111-111111111111',@{a='1';b='2';c='3'},$true)
+    } ('function Invoke-NestedValidationFile { ' + ${function:Invoke-NestedValidationFile}.ToString() + ' }') $fixture $fixtureCredential
+    Assert-True ($transport.Identity -eq [guid]'11111111-1111-1111-1111-111111111111' -and
+        $transport.HashCount -eq 3 -and $transport.Restricted -eq $true -and $transport.ClassifierPresent) 'In-memory validation transport preserves GUID, hashtable and bool arguments without a guest helper file'
+} finally {
+    if ($fixtureCredential) { $fixtureCredential.Password.Dispose() }
+    if (Test-Path -LiteralPath $fixture) { Remove-Item -LiteralPath $fixture -Force }
+}
 function New-TestContinuationLayout {
     @{
         Vm=[pscustomobject]@{Name='Test-L2'; Id=[guid]'11111111-1111-1111-1111-111111111111'; Generation=2; State='Running'}
@@ -118,6 +157,7 @@ function New-TestContinuationLayout {
             Status='Failed'; FailureStage='PowerShellDirectReadiness'; VmName='Test-L2'
             VmId='11111111-1111-1111-1111-111111111111'; BiosGuid='22222222-2222-2222-2222-222222222222'
             ChildPath='C:\Synthetic\Test-L2.vhdx'; ParentPath='C:\SyntheticCache\parent.vhdx'
+            AnswerFilesRemoved=$false; ActivationChecked=$false; InternetDenyReady=$false
         }
         Drives=@([pscustomobject]@{Path='C:\Synthetic\Test-L2.vhdx'})
         Adapters=@([pscustomobject]@{SwitchName='OptionalLab-Internal'})
@@ -136,6 +176,16 @@ $layout.Vm.State='Off'
 $layout.Disk.Attached=$false
 Assert-NestedContinuationLayout @layout
 Assert-True $true 'An identified stopped VM can be started without replacing its disk'
+$configured=New-TestContinuationLayout
+$configured.State.Status='Configured'
+$configured.State.FailureStage=$null
+$configured.State.AnswerFilesRemoved=$true
+$configured.State.ActivationChecked=$true
+$configured.State.InternetDenyReady=$true
+Assert-NestedContinuationLayout @configured -Configured
+Assert-True $true 'Read-only verification requires the completed identity-matched creation record'
+$configured.State.ActivationChecked=$false
+Assert-Throws { Assert-NestedContinuationLayout @configured -Configured } 'Verification cannot bypass recorded licensing readiness'
 foreach ($change in @(
     {param($x) $x.Vm.Id=[guid]'33333333-3333-3333-3333-333333333333'},
     {param($x) $x.BiosGuid=[guid]'33333333-3333-3333-3333-333333333333'},
