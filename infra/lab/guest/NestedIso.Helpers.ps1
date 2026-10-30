@@ -191,8 +191,14 @@ function Assert-NestedContinuationLayout {
             $State.ActivationChecked -ne $true -or $State.InternetDenyReady -ne $true) {
             throw 'Verification requires the completed nested VM creation record.'
         }
-    } elseif ($State.Status -ne 'Failed' -or $State.FailureStage -ne 'PowerShellDirectReadiness') {
-        throw 'Existing nested VM continuation requires the matching failed connection-readiness record.'
+    } else {
+        $failedReadiness=$State.Status -eq 'Failed' -and $State.FailureStage -eq 'PowerShellDirectReadiness'
+        $interruptedBoot=$State.Status -eq 'Booting' -and
+            [string]::IsNullOrEmpty($State.FailureStage) -and [string]::IsNullOrEmpty($State.FailureKind) -and
+            $State.AnswerFilesRemoved -eq $false -and $State.ActivationChecked -eq $false -and $State.InternetDenyReady -eq $false
+        if (-not ($failedReadiness -or $interruptedBoot)) {
+            throw 'Existing nested VM continuation requires a failed readiness or interrupted initial boot record.'
+        }
     }
     if ($State.VmName -ne $VmName -or $State.ChildPath -ne $ChildPath -or
         -not [guid]::TryParse([string]$State.VmId,[ref]$recordVmId) -or $recordVmId -eq [guid]::Empty -or

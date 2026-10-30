@@ -172,8 +172,13 @@ try {
         if ($line -like 'network nic update*') { $script:events.Add('NicDns'); return @{name='nic'} }
         throw "Unexpected synthetic CLI request: $line"
     }
+    $script:previousGuestState='Failed'
     function Invoke-LabArm {
         param($Context, $Method, $Path, $Body)
+        if ($Method -eq 'GET' -and $Path -like '*/runCommands/lab-*') {
+            $script:events.Add('PreviousGuestChecked')
+            return @{properties=@{instanceView=@{executionState=$script:previousGuestState}}}
+        }
         if ($Method -eq 'PUT' -and $Path -like '*deployments/optional-lab*') {
             $script:events.Add('ResourceDeploymentRequested')
             $script:deploymentBody = $Body
@@ -372,6 +377,21 @@ try {
         -not $script:events.Contains('ResourceDeploymentRequested') -and
         -not $script:events.Contains('dns/InitializeDns') -and
         -not $script:events.Contains('hyperv/PrepareHyperV')) 'Existing L2 completion never falls back to fresh creation or completed foundation stages.'
+    Assert-Test ($script:events.IndexOf('PreviousGuestChecked') -lt $script:events.IndexOf('dns/StageSource')) 'The original command is checked before any source staging.'
+    foreach ($execution in @('Running','Pending','Succeeded','Unknown',$null)) {
+        $script:previousGuestState=$execution
+        $script:events.Clear()
+        Assert-Throws { Invoke-LabAutomation -Context $context -Recovery $completionRecovery } 'Lab deployment stopped at ValidateInputs'
+        Assert-Test (-not $script:events.Contains('dns/StageSource') -and
+            -not $script:events.Contains('hyperv/CompleteNested') -and
+            -not $script:events.Contains('RestrictionApplied')) 'An active, successful or unknown original command prevents completion writes.'
+    }
+    foreach ($execution in @('Canceled','TimedOut')) {
+        $script:previousGuestState=$execution
+        $result=Invoke-LabAutomation -Context $context -Recovery $completionRecovery
+        Assert-Test ($result.Status -eq 'Succeeded') 'An unsuccessfully stopped original command permits explicit completion.'
+    }
+    $script:previousGuestState='Failed'
     $priorCompletion = $nestedRecord.Clone()
     $priorCompletion.Detail = @{CurrentRole='hyperv'; LastRunCommand='lab-dddddddd-completenested-123abc'}
     $priorCompletion | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $previousStatePath

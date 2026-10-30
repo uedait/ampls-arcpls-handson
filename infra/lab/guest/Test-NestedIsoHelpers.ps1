@@ -154,7 +154,7 @@ function New-TestContinuationLayout {
     @{
         Vm=[pscustomobject]@{Name='Test-L2'; Id=[guid]'11111111-1111-1111-1111-111111111111'; Generation=2; State='Running'}
         State=[pscustomobject]@{
-            Status='Failed'; FailureStage='PowerShellDirectReadiness'; VmName='Test-L2'
+            Status='Failed'; FailureStage='PowerShellDirectReadiness'; FailureKind=$null; VmName='Test-L2'
             VmId='11111111-1111-1111-1111-111111111111'; BiosGuid='22222222-2222-2222-2222-222222222222'
             ChildPath='C:\Synthetic\Test-L2.vhdx'; ParentPath='C:\SyntheticCache\parent.vhdx'
             AnswerFilesRemoved=$false; ActivationChecked=$false; InternetDenyReady=$false
@@ -176,6 +176,31 @@ $layout.Vm.State='Off'
 $layout.Disk.Attached=$false
 Assert-NestedContinuationLayout @layout
 Assert-True $true 'An identified stopped VM can be started without replacing its disk'
+$interrupted=New-TestContinuationLayout
+$interrupted.State.Status='Booting'
+$interrupted.State.FailureStage=$null
+$interrupted.Vm.State='Off'
+$interrupted.Disk.Attached=$false
+Assert-NestedContinuationLayout @interrupted
+Assert-True $true 'A power-interrupted initial boot can continue from its existing stopped VM'
+foreach ($change in @(
+    {param($x) $x.State.Status='Configuring'},
+    {param($x) $x.State.Status='Configured'},
+    {param($x) $x.State.FailureStage='GuestNetworkAndImds'},
+    {param($x) $x.State.FailureKind='UnknownFailure'},
+    {param($x) $x.State.AnswerFilesRemoved=$true},
+    {param($x) $x.State.ActivationChecked=$true},
+    {param($x) $x.State.InternetDenyReady=$true},
+    {param($x) $x.Vm.Id=[guid]'33333333-3333-3333-3333-333333333333'},
+    {param($x) $x.Disk.ParentPath='C:\OtherParent.vhdx'},
+    {param($x) $x.Adapters[0].SwitchName='OtherSwitch'}
+)) {
+    $invalidInterrupted=New-TestContinuationLayout
+    $invalidInterrupted.State.Status='Booting'
+    $invalidInterrupted.State.FailureStage=$null
+    & $change $invalidInterrupted
+    Assert-Throws { Assert-NestedContinuationLayout @invalidInterrupted } 'Interrupted boot cannot bypass stage or identity checks'
+}
 $configured=New-TestContinuationLayout
 $configured.State.Status='Configured'
 $configured.State.FailureStage=$null

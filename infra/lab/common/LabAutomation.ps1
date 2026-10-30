@@ -396,6 +396,17 @@ function Invoke-LabAutomation {
         Save-LabRunState $Context $stage 'Running'
         $azContext = $Context.AzureContext
         Assert-HandsonAzContext @azContext
+        if ($recovering -and $Recovery['ResumeFrom'] -eq 'CompleteNested') {
+            $previous=Get-Content -LiteralPath (Join-Path $Recovery.PreviousRunDirectory 'state.json') -Raw |
+                ConvertFrom-Json -AsHashtable
+            $commandPath=Get-LabResourcePath $Context (
+                "providers/Microsoft.Compute/virtualMachines/$($Context.Prefix)-hyperv/runCommands/$($previous.Detail.LastRunCommand)?api-version=2024-07-01&`$expand=instanceView")
+            $previousCommand=Invoke-LabArm -Context $Context -Method GET -Path $commandPath
+            $previousExecution=$previousCommand.properties['instanceView']
+            if (-not $previousExecution -or $previousExecution['executionState'] -notin @('Failed','Canceled','TimedOut')) {
+                throw 'Existing nested completion requires the original guest command to have stopped unsuccessfully.'
+            }
+        }
         if ($Context.AzureContext.ContainsKey('ExpectedClientId')) {
             $phaseScript = Get-Command -Name (Join-Path $Context.Source.Root 'infra\lab\Set-LabInternetAccess.ps1') -ErrorAction Stop
             if (-not $phaseScript.Parameters.ContainsKey('ExpectedClientId')) {

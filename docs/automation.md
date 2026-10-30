@@ -83,9 +83,11 @@ Azure の管理者パスワードは secure パラメーターとして ARM の�
 
 DNS 転送先の未設定は、初回構成時には正常な状態として扱います。設定後の確認では、転送先が `168.63.129.16` の1件だけであることを要求します。
 
-`CompleteNested` は、L2 の作成後に PowerShell Direct 接続待ちで停止した場合の完了処理です。元の制御記録は BuildNested / Failed、対象は Hyper-V ホストで、最後の Run Command は元の Run ID の BuildNested または CompleteNested であることを要求します。作成済み L2 の VM ID、BIOS GUID、Generation 2、接続ディスクと親参照、内部スイッチが作成記録と一致する場合だけ設定を続行します。不一致の場合に新規作成へ切り替えることはありません。
+`CompleteNested` は、L2 の作成後に PowerShell Direct 接続待ちで停止した場合の完了処理です。元の制御記録は BuildNested / Failed、対象は Hyper-V ホストで、最後の Run Command は元の Run ID の BuildNested または CompleteNested であることを要求します。元の管理コマンドの実行状態が Failed、Canceled、TimedOut のいずれかであることを、ソース再配置やゲスト設定の前に確認します。実行中、保留中、成功、不明の場合は継続せず、元の処理との重複を防ぎます。
 
-この経路では VM、親・子ディスク、応答ファイル、NAT を再作成せず、ディスクをマウント解除しません。元の状態記録を保存し、必要な場合だけ同じ L2 を起動します。接続後の UUID 確認から、既知の応答ファイルの後片付け、ゲスト設定、ハンドオーバー、正規の評価版認証と確認を実行します。
+ゲストの作成記録は Failed / PowerShellDirectReadiness、または初回設定前の Booting を対象にします。Booting は、応答ファイル削除・認証確認・Internet 遮断準備がすべて未完了で、失敗段階と失敗種別が空の場合に限ります。電源断で失敗を記録できなかった状態も、記録を人為的に Failed へ書き換えず扱います。Configuring や Configured の状態から設定を繰り返す経路には使いません。作成済み L2 の VM ID、BIOS GUID、Generation 2、接続ディスクと親参照、内部スイッチが作成記録と一致する場合だけ設定を続行します。不一致の場合に新規作成へ切り替えることはありません。
+
+この経路では VM、親・子ディスク、応答ファイル、NAT を再作成せず、ディスクをマウント解除しません。元の状態記録を保存し、必要な場合だけ同じ L2 を起動します。接続待ちの経過時間と試行回数は再開時に新しく計測し、過去の診断は保持します。同一コミットのゲスト操作は既存のパッケージロックで排他実行します。接続後の UUID 確認から、既知の応答ファイルの後片付け、ゲスト設定、ハンドオーバー、正規の評価版認証と確認を実行します。
 
 ゲスト側では `New-NestedLabFromIso.ps1 -UseDefaultMedia -ContinueExistingVm` の専用モードを使います。このモードで `UseDefaultMedia` を指定しても、ISO の取得やディスク作成は行いません。`ContinueExistingVm` を指定しない通常の実行は、既存 VM とゲストディレクトリを引き続き拒否します。
 
