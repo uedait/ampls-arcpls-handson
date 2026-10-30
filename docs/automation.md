@@ -30,6 +30,10 @@ VM の `securityType` は `Standard` を明示し、Microsoft.Compute の VM API
 
 Azure VM の IMDS 通信はプラットフォームの既定動作を維持し、NSG に `AzurePlatformIMDS` タグの規則を追加しません。L2 からの IMDS 接続だけを L2 内の Windows Firewall で遮断します。
 
+内部スイッチを作成した後は、その仮想 NIC の出現を最大30秒待ちます。IPv4 がまだ設定されていない状態は正常な初期状態として扱い、`192.168.100.1/24` を構成します。既存の異なる IP や NAT を削除・上書きすることはありません。NIC の照会自体が失敗した場合も、未設定として扱わず停止します。
+
+L2 の BIOS GUID は、Hyper-V の VM ID に対応する `Msvm_VirtualSystemSettingData` の現在の設定から取得します。対象が1件で、BIOS GUID が有効かつ空でないことを要求します。スナップショットや別 VM の設定、VM ID 自体を BIOS GUID の代わりに使用することはありません。
+
 1. GitHub の ref を完全なコミット SHA に解決し、同じコミットの ZIP を管理端末に取得します。展開したコミット内の Bicep とゲストスクリプトを使用します。
 2. 3 VNet、Firewall、Bastion、Resolver、3台の VM と各 PIP・NIC NSG をデプロイします。構築中の外向き通信を許可します。
 3. Managed Run Command の実行経路を確認した後、各 VM に ZIP の短期取得 URL を渡して取得・展開します。各 VM の ZIP ハッシュとコミットを照合します。
@@ -88,3 +92,4 @@ DNS 転送先の未設定は、初回構成時には正常な状態として扱�
 - [GitHub の ZIP アーカイブ API](https://docs.github.com/rest/repos/contents#download-a-repository-archive-zip)
 - [Windows Server 2022 評価版](https://www.microsoft.com/en-us/evalcenter/download-windows-server-2022)
 - [Standard セキュリティを明示する場合の API](https://learn.microsoft.com/azure/virtual-machines/trusted-launch-faq#can-i-disable-trusted-launch-for-a-new-vm-deployment)
+- [Hyper-V の VM 設定と BIOS GUID](https://learn.microsoft.com/windows/win32/hyperv_v2/msvm-virtualsystemsettingdata)

@@ -122,16 +122,18 @@ try {
     Set-VMMemory -VMName $VmName -DynamicMemoryEnabled $false
     Set-VM -VMName $VmName -AutomaticStartAction Nothing -AutomaticStopAction ShutDown
     Set-VMFirmware -VMName $VmName -EnableSecureBoot On -SecureBootTemplate MicrosoftWindows
+    $biosGuid = Get-NestedVmBiosGuid -VmId $vm.Id
+    $state['VmId'] = "$($vm.Id)"
+    $state['BiosGuid'] = "$biosGuid"
     $state.Status = 'Booting'
     Save-NestedManifest $statePath $state
     Start-VM -Name $VmName | Out-Null
     $stage = 'PowerShellDirectReadiness'
     $direct = Wait-NestedDirect -VmName $VmName -Credential $credential -TimeoutSeconds $ReadinessTimeoutSeconds
     $session = $direct.Session
-    if (-not $vm.BiosGuid) { throw 'Cannot obtain nested VM BIOS GUID.' }
     # Check guest identity before removing only known answer-file cache paths.
     $stage = 'AnswerFileCleanup'
-    Invoke-Command -Session $session -ArgumentList "$($vm.BiosGuid)" -ScriptBlock {
+    Invoke-Command -Session $session -ArgumentList "$biosGuid" -ScriptBlock {
         param([guid]$Expected)
         $ErrorActionPreference = 'Stop'
         if ([guid](Get-CimInstance Win32_ComputerSystemProduct).UUID -ne $Expected -or
@@ -155,14 +157,14 @@ try {
     Save-NestedManifest $statePath $state
     $stage = 'GuestNetworkAndImds'
     Invoke-Command -Session $session -FilePath (Join-Path $PSScriptRoot 'Set-NestedGuest.ps1') `
-        -ArgumentList "$($vm.BiosGuid)" -ErrorAction Stop
+        -ArgumentList "$biosGuid" -ErrorAction Stop
     Invoke-Command -Session $session -FilePath (Join-Path $PSScriptRoot 'Test-NestedImds.ps1') `
-        -ArgumentList "$($vm.BiosGuid)" -ErrorAction Stop
+        -ArgumentList "$biosGuid" -ErrorAction Stop
     $stage = 'HandoverScripts'
     $scriptsDirectory = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\..\scripts'))
     $hashes = @{}
     Invoke-Command -Session $session -FilePath (Join-Path $PSScriptRoot 'Initialize-LabHandover.ps1') `
-        -ArgumentList "$($vm.BiosGuid)" -ErrorAction Stop | Out-Null
+        -ArgumentList "$biosGuid" -ErrorAction Stop | Out-Null
     foreach ($name in @('Install-ArcAgent.ps1', 'Connect-ArcServer.ps1', 'Write-HandsonEvent.ps1')) {
         $source = Join-Path $scriptsDirectory $name
         $hashes[$name] = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
@@ -199,9 +201,9 @@ try {
     }
     $stage = 'BuildReadiness'
     $readiness = Invoke-Command -Session $session -FilePath (Join-Path $PSScriptRoot 'Test-LabNestedReadiness.ps1') `
-        -ArgumentList "$($vm.BiosGuid)", $hashes, $false -ErrorAction Stop
+        -ArgumentList "$biosGuid", $hashes, $false -ErrorAction Stop
     if (-not $readiness.NestedReady) { throw 'L2 readiness failed.' }
-    $state.BiosGuid = "$($vm.BiosGuid)"
+    $state.BiosGuid = "$biosGuid"
     $state.HandoverHashes = $hashes
     $state.UpdatesBaseline = 'StandardImageOnly'
     $stage = 'SessionCleanup'

@@ -73,4 +73,6 @@ if ($SkipMockTests) {
 } else {
     & (Join-Path $root 'tests\Invoke-LocalTests.ps1')
     & (Join-Path $root 'tests\Test-LabAutomation.ps1')
+    & (Join-Path $root 'infra\lab\guest\Test-NestedIsoHelpers.ps1')
+    & (Join-Path $root 'infra\lab\guest\Test-LabRoleHelpers.ps1')
 }

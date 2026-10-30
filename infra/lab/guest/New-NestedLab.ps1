@@ -14,10 +14,11 @@ if (-not (Get-NetIPAddress -AddressFamily IPv4 | Where-Object IPAddress -eq '10.
 }
 Import-Module Hyper-V -ErrorAction Stop
 if ((Get-Service vmms).Status -ne 'Running') { throw 'Install Hyper-V, reboot the host, then retry.' }
-foreach ($file in @('Set-NestedGuest.ps1', 'Test-NestedImds.ps1', 'Initialize-NestedNetwork.ps1')) {
+foreach ($file in @('Set-NestedGuest.ps1', 'Test-NestedImds.ps1', 'Initialize-NestedNetwork.ps1', 'NestedIso.Helpers.ps1')) {
     if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot $file) -PathType Leaf)) {
         throw "Missing companion script: $file"
     }
+    . (Join-Path $PSScriptRoot 'NestedIso.Helpers.ps1')
 }
 $source = Get-Item -LiteralPath $SourceVhdx -ErrorAction Stop
 if ($source.Extension -ne '.vhdx') { throw 'A legally prepared, generalized Gen2 Windows Server VHDX is required.' }
@@ -52,15 +53,15 @@ if (-not $existingVm) {
 if ($existingVm.State -eq 'Off') { Start-VM -Name $VmName | Out-Null }
 elseif ($existingVm.State -ne 'Running') { throw 'VM must be Off or Running. Resolve its state manually.' }
 $vm = Get-VM -Name $VmName
-if (-not $vm.BiosGuid) { throw 'Cannot obtain the nested VM BIOS GUID; refusing guest configuration.' }
+$biosGuid = Get-NestedVmBiosGuid -VmId $vm.Id
 $credential = Get-Credential -Message 'Enter the L2 local administrator credentials (never stored by this script)'
 if (-not $credential) { throw 'Guest credentials are required.' }
 try {
     # PowerShell Direct never falls back to a host session or network remoting.
     Invoke-Command -VMName $VmName -Credential $credential -FilePath `
-        (Join-Path $PSScriptRoot 'Set-NestedGuest.ps1') -ArgumentList "$($vm.BiosGuid)" -ErrorAction Stop
+        (Join-Path $PSScriptRoot 'Set-NestedGuest.ps1') -ArgumentList "$biosGuid" -ErrorAction Stop
     Invoke-Command -VMName $VmName -Credential $credential -FilePath `
-        (Join-Path $PSScriptRoot 'Test-NestedImds.ps1') -ArgumentList "$($vm.BiosGuid)" -ErrorAction Stop
+        (Join-Path $PSScriptRoot 'Test-NestedImds.ps1') -ArgumentList "$biosGuid" -ErrorAction Stop
 }
 catch {
     throw "Nested guest configuration/verification failed; resources were retained. Complete OOBE, confirm credentials and PowerShell Direct readiness, then rerun. $($_.Exception.Message)"

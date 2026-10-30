@@ -447,7 +447,8 @@ function Get-LabNestedChecks {
         throw 'Hyper-V feature/service not ready.'
     }
     $vm = Get-VM -Name 'ArcOnpremL2' -ErrorAction Stop
-    if ($vm.State -ne 'Running' -or $vm.Generation -ne 2 -or -not $vm.BiosGuid) { throw 'L2 VM not ready.' }
+    if ($vm.State -ne 'Running' -or $vm.Generation -ne 2) { throw 'L2 VM not ready.' }
+    $biosGuid = Get-NestedVmBiosGuid -VmId $vm.Id
     $hashes = @{}
     foreach ($name in @('Install-ArcAgent.ps1','Connect-ArcServer.ps1','Write-HandsonEvent.ps1')) {
         $hashes[$name] = (Get-FileHash -LiteralPath (Join-Path $Package "scripts\$name") -Algorithm SHA256).Hash
@@ -458,7 +459,7 @@ function Get-LabNestedChecks {
         $direct = Wait-NestedDirect -VmName $vm.Name -Credential $Credential -TimeoutSeconds 120
         $session = $direct.Session
         $checks = @(Invoke-Command -Session $session -FilePath (Join-Path $Package 'infra\lab\guest\Test-LabNestedReadiness.ps1') `
-            -ArgumentList "$($vm.BiosGuid)", $hashes, $Restricted -ErrorAction Stop)
+            -ArgumentList "$biosGuid", $hashes, $Restricted -ErrorAction Stop)
         if ($checks.Count -ne 1 -or -not $checks[0].NestedReady) { throw 'Unexpected nested verification result.' }
         foreach ($key in @('NestedReady','IdentityReady','NetworkReady','DnsReady','ImdsBlocked','HandoverFilesReady','Licensed')) {
             if ($checks[0].$key -isnot [bool] -or -not $checks[0].$key) { throw 'Nested public check did not pass.' }

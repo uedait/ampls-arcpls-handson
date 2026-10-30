@@ -75,6 +75,156 @@ $cachedReturn = @(& {
 } $cleanupStatements)
 Assert-True ($cachedReturn.Count -eq 1 -and $cachedReturn[0] -is [string] -and
     $cachedReturn[0] -ceq 'C:\SyntheticParent.vhdx') 'A cached parent return remains exactly one VHDX string after finally cleanup'
+
+function Invoke-TestBiosLookup {
+    param([string]$Mode)
+    & {
+        param($Mode,$Definition)
+        function Get-CimInstance {
+            [CmdletBinding()]
+            param([string]$Namespace,[string]$ClassName,[string]$Filter)
+            if ($Namespace -ne 'root\virtualization\v2' -or $ClassName -ne 'Msvm_VirtualSystemSettingData' -or
+                -not $Filter.Contains('11111111-1111-1111-1111-111111111111') -or
+                -not $Filter.Contains('Microsoft:Hyper-V:System:Realized')) { throw 'Unexpected BIOS lookup scope' }
+            if ($Mode -eq 'error') { throw 'Synthetic CIM lookup failure' }
+            if ($Mode -eq 'missing') { return }
+            $record=[pscustomobject]@{
+                VirtualSystemIdentifier='11111111-1111-1111-1111-111111111111'
+                VirtualSystemType='Microsoft:Hyper-V:System:Realized'
+                BIOSGUID='{22222222-2222-2222-2222-222222222222}'
+            }
+            if ($Mode -eq 'wrong-vm') { $record.VirtualSystemIdentifier='33333333-3333-3333-3333-333333333333' }
+            if ($Mode -eq 'snapshot') { $record.VirtualSystemType='Microsoft:Hyper-V:Snapshot:Realized' }
+            if ($Mode -eq 'bad-guid') { $record.BIOSGUID='invalid' }
+            if ($Mode -eq 'empty-guid') { $record.BIOSGUID=[guid]::Empty.ToString() }
+            $record
+            if ($Mode -eq 'multiple') { $record }
+        }
+        . ([scriptblock]::Create($Definition))
+        Get-NestedVmBiosGuid -VmId '11111111-1111-1111-1111-111111111111'
+    } $Mode ('function Get-NestedVmBiosGuid { ' + ${function:Get-NestedVmBiosGuid}.ToString() + ' }')
+}
+$bios = @(Invoke-TestBiosLookup good)
+Assert-True ($bios.Count -eq 1 -and $bios[0] -is [guid] -and
+    $bios[0] -eq [guid]'22222222-2222-2222-2222-222222222222') 'Resolve the current BIOS GUID rather than substituting the VM ID'
+foreach ($mode in @('missing','multiple','wrong-vm','snapshot','bad-guid','empty-guid','error')) {
+    Assert-Throws { Invoke-TestBiosLookup $mode } 'Reject missing, ambiguous or mismatched BIOS identity without fallback'
+}
+Assert-Throws { Get-NestedVmBiosGuid -VmId ([guid]::Empty) } 'Reject an empty VM ID before CIM lookup'
+foreach ($name in @('New-NestedLabFromIso.ps1','New-NestedLab.ps1','Invoke-LabRole.ps1')) {
+    $text=[IO.File]::ReadAllText((Join-Path $PSScriptRoot $name))
+    Assert-True (-not ($text -match '\$vm\.BiosGuid') -and
+        $text.Contains('Get-NestedVmBiosGuid -VmId $vm.Id')) 'Every VM BIOS identity consumer uses the shared CIM lookup'
+}
+
+$networkTokens=$null
+$networkErrors=$null
+$networkAst=[Management.Automation.Language.Parser]::ParseFile(
+    (Join-Path $PSScriptRoot 'Initialize-NestedNetwork.ps1'),[ref]$networkTokens,[ref]$networkErrors)
+function New-TestNetworkState {
+    @{
+        SwitchExists=$false; AdapterReadyAfter=2; AdapterPolls=0; Sleeps=0
+        InternalIps=@(); Nats=@(); SwitchCreates=0; IpCreates=0; NatCreates=0
+        FailAdapterRead=$false
+    }
+}
+function Invoke-TestNetworkSetup {
+    param([hashtable]$State)
+    & {
+        param($State,$Body)
+        $SwitchName='OptionalLab-Internal'
+        $NatName='OptionalLab-NAT'
+        function Get-Service { param($Name) [pscustomobject]@{Status='Running'} }
+        function Get-NetIPAddress {
+            [CmdletBinding()]
+            param([string]$AddressFamily,[int]$InterfaceIndex)
+            if ($PSBoundParameters.ContainsKey('InterfaceIndex')) { throw 'A missing interface IPv4 query is not an empty result' }
+            [pscustomobject]@{IPAddress='10.30.1.4'; InterfaceAlias='Ethernet'; InterfaceIndex=4; PrefixLength=24}
+            $State.InternalIps
+        }
+        function Get-VMSwitch {
+            [CmdletBinding()]
+            param($Name)
+            if ($State.SwitchExists) { [pscustomobject]@{SwitchType='Internal'} }
+        }
+        function New-VMSwitch {
+            param($Name,$SwitchType)
+            $State.SwitchCreates++
+            $State.SwitchExists=$true
+            [pscustomobject]@{SwitchType='Internal'}
+        }
+        function Get-NetNat {
+            [CmdletBinding()]
+            param($Name)
+            if ($Name) { $State.Nats | Where-Object Name -eq $Name } else { $State.Nats }
+        }
+        function Get-NetAdapter {
+            [CmdletBinding()]
+            param($Name)
+            if ($State.FailAdapterRead) { throw 'Synthetic CIM adapter failure' }
+            if ($Name) { throw 'A missing named adapter query must not bypass readiness handling' }
+            $State.AdapterPolls++
+            [pscustomobject]@{Name='Ethernet'; ifIndex=4}
+            if ($State.AdapterPolls -gt $State.AdapterReadyAfter) {
+                [pscustomobject]@{Name='vEthernet (OptionalLab-Internal)'; ifIndex=14}
+            }
+        }
+        function Start-Sleep { param($Seconds) $State.Sleeps++ }
+        function New-NetIPAddress {
+            param($InterfaceIndex,$IPAddress,$PrefixLength)
+            if ($InterfaceIndex -ne 14 -or $IPAddress -ne '192.168.100.1' -or $PrefixLength -ne 24) { throw 'Unexpected static IPv4 target' }
+            $State.IpCreates++
+            $State.InternalIps=@([pscustomobject]@{
+                IPAddress=$IPAddress; PrefixLength=$PrefixLength; InterfaceIndex=14
+                InterfaceAlias='vEthernet (OptionalLab-Internal)'
+            })
+        }
+        function New-NetNat {
+            param($Name,$InternalIPInterfaceAddressPrefix)
+            if ($Name -ne 'OptionalLab-NAT' -or $InternalIPInterfaceAddressPrefix -ne '192.168.100.0/24') { throw 'Unexpected NAT target' }
+            $State.NatCreates++
+            $State.Nats=@([pscustomobject]@{Name=$Name; InternalIPInterfaceAddressPrefix=$InternalIPInterfaceAddressPrefix})
+        }
+        . ([scriptblock]::Create($Body))
+    } $State $networkAst.EndBlock.Extent.Text
+}
+$freshNetwork=New-TestNetworkState
+Invoke-TestNetworkSetup $freshNetwork
+Assert-True ($freshNetwork.AdapterPolls -eq 3 -and $freshNetwork.Sleeps -eq 2) 'Wait for the internal NIC instead of assuming immediate visibility'
+Assert-True ($freshNetwork.SwitchCreates -eq 1 -and $freshNetwork.IpCreates -eq 1 -and
+    $freshNetwork.NatCreates -eq 1) 'An initially empty IPv4 interface is configured once'
+Invoke-TestNetworkSetup $freshNetwork
+Assert-True ($freshNetwork.SwitchCreates -eq 1 -and $freshNetwork.IpCreates -eq 1 -and
+    $freshNetwork.NatCreates -eq 1) 'A correct existing network is not recreated'
+$conflict=New-TestNetworkState
+$conflict.SwitchExists=$true
+$conflict.InternalIps=@([pscustomobject]@{
+    IPAddress='192.168.100.2'; PrefixLength=24; InterfaceIndex=14
+    InterfaceAlias='vEthernet (OptionalLab-Internal)'
+})
+Assert-Throws { Invoke-TestNetworkSetup $conflict } 'Reject a conflicting static IP without removing it'
+Assert-True ($conflict.IpCreates -eq 0 -and $conflict.NatCreates -eq 0) 'A conflicting interface is not overwritten'
+$readFailure=New-TestNetworkState
+$readFailure.FailAdapterRead=$true
+Assert-Throws { Invoke-TestNetworkSetup $readFailure } 'A CIM read failure is not treated as an absent adapter'
+Assert-True ($readFailure.IpCreates -eq 0 -and $readFailure.NatCreates -eq 0) 'Adapter read errors prevent IP and NAT changes'
+$timeoutGuard=$networkAst.Find({
+    param($node)
+    $node -is [Management.Automation.Language.IfStatementAst] -and
+    $node.Extent.Text.StartsWith('if ($watch.Elapsed.TotalSeconds -ge 30')
+},$true)
+Assert-True ($null -ne $timeoutGuard) 'Internal adapter readiness has a 30-second deadline'
+foreach ($seconds in @(29,30)) {
+    $probe={
+        & {
+            param($Seconds,$Guard)
+            $watch=[pscustomobject]@{Elapsed=[timespan]::FromSeconds($Seconds)}
+            . ([scriptblock]::Create($Guard.Extent.Text))
+        } $seconds $timeoutGuard
+    }
+    if ($seconds -eq 29) { & $probe; Assert-True $true 'Adapter readiness is allowed before 30 seconds' }
+    else { Assert-Throws $probe 'Adapter readiness stops at 30 seconds' }
+}
 Assert-NestedOfficialUri ([uri]'https://download.microsoft.com/media.iso')
 foreach ($bad in @(
     'http://download.microsoft.com/media.iso',

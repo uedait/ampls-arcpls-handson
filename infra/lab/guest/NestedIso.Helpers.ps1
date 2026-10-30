@@ -119,6 +119,25 @@ function Get-NestedMedia {
     return [pscustomobject]@{ Path = $path; Sha256 = $Sha256 }
 }
 
+function Get-NestedVmBiosGuid {
+    param([Parameter(Mandatory)][guid]$VmId)
+    if ($VmId -eq [guid]::Empty) { throw 'A non-empty VM ID is required for BIOS identity lookup.' }
+    $id = $VmId.ToString()
+    $settings = @(Get-CimInstance -Namespace 'root\virtualization\v2' `
+        -ClassName Msvm_VirtualSystemSettingData `
+        -Filter "VirtualSystemIdentifier='$id' AND VirtualSystemType='Microsoft:Hyper-V:System:Realized'" `
+        -ErrorAction Stop)
+    if ($settings.Count -ne 1 -or $settings[0].VirtualSystemIdentifier -ne $id -or
+        $settings[0].VirtualSystemType -ne 'Microsoft:Hyper-V:System:Realized') {
+        throw 'Expected exactly one current setting for the requested Hyper-V VM ID.'
+    }
+    $biosGuid = [guid]::Empty
+    if (-not [guid]::TryParse([string]$settings[0].BIOSGUID, [ref]$biosGuid) -or $biosGuid -eq [guid]::Empty) {
+        throw 'The current Hyper-V VM settings do not contain a valid BIOS GUID.'
+    }
+    return $biosGuid
+}
+
 function New-NestedUnattendXml {
     param(
         [Parameter(Mandatory)][string]$ComputerName,

@@ -21,9 +21,17 @@ if (@(Get-NetIPAddress -AddressFamily IPv4 | Where-Object {
     $_.IPAddress -like '192.168.100.*' -and $_.InterfaceAlias -ne "vEthernet ($SwitchName)"
 }).Count -gt 0) { throw '192.168.100.0/24 overlaps another host interface.' }
 if (-not $switch) { $switch = New-VMSwitch -Name $SwitchName -SwitchType Internal }
-$adapter = Get-NetAdapter -Name "vEthernet ($SwitchName)" -ErrorAction Stop
-$static = @(Get-NetIPAddress -InterfaceIndex $adapter.ifIndex -AddressFamily IPv4 |
-    Where-Object { $_.IPAddress -notlike '169.254.*' })
+$watch = [Diagnostics.Stopwatch]::StartNew()
+do {
+    $adapters = @(Get-NetAdapter -ErrorAction Stop | Where-Object Name -eq "vEthernet ($SwitchName)")
+    if ($adapters.Count -gt 1) { throw 'Internal switch adapter identity is ambiguous.' }
+    if ($adapters.Count -eq 1) { break }
+    if ($watch.Elapsed.TotalSeconds -ge 30) { throw 'Internal switch adapter readiness timed out.' }
+    Start-Sleep -Seconds 1
+} while ($true)
+$adapter = $adapters[0]
+$static = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop |
+    Where-Object { $_.InterfaceIndex -eq $adapter.ifIndex -and $_.IPAddress -notlike '169.254.*' })
 if ($static.Count -gt 0 -and ($static.Count -ne 1 -or
     $static[0].IPAddress -ne '192.168.100.1' -or $static[0].PrefixLength -ne 24)) {
     throw 'Internal switch has conflicting IPv4 settings. No existing IP will be removed.'
