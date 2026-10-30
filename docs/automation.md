@@ -89,7 +89,13 @@ DNS 転送先の未設定は、初回構成時には正常な状態として扱�
 
 ゲスト側では `New-NestedLabFromIso.ps1 -UseDefaultMedia -ContinueExistingVm` の専用モードを使います。このモードで `UseDefaultMedia` を指定しても、ISO の取得やディスク作成は行いません。`ContinueExistingVm` を指定しない通常の実行は、既存 VM とゲストディレクトリを引き続き拒否します。
 
-PowerShell SDK の停止例外は、エラーストリームに加えて `InvocationStateInfo.Reason.ErrorRecord` も確認します。Microsoft が示す既知の英語の起動待ち transport エラーだけを期限内で再試行し、認証・権限・未知のエラーを再試行対象へ広げません。
+PowerShell SDK の停止例外は、エラーストリームに加えて `InvocationStateInfo.Reason.ErrorRecord` も確認します。Microsoft が示す既知の英語の起動待ち transport エラーは、全体の待機期限内で10秒間隔で再試行します。全体の既定上限は30分です。
+
+ISO から作成した L2 の初回セッション確立時には `InitialBoot` を指定します。この場合に限り、内部例外のない `PSRemotingDataStructureException` も再試行します。最初の発生以降は、接続試行と待機を合わせて最大3分とし、全体の期限も超えません。この例外型が常に一時的であることを意味しません。接続を確立できない場合は期限で停止します。初回接続失敗からの `CompleteNested` でも、記録と実 VM の識別が一致した後の接続待ちにだけ同じ指定を使います。設定済み VM の検証や通常の接続では、この追加の再試行を行いません。
+
+認証・権限拒否は、エラー分類、例外階層の数値コード、既知の英文を確認して直ちに停止します。その他の例外型や、内部例外を持つ未知のデータ構造エラーも再試行しません。接続成功後の UUID 確認と準備状態の検査は省略しません。
+
+接続待ちの診断は、保護された L2 作成ディレクトリの `direct-readiness.jsonl` に追記します。記録する内容は、再試行・拒否・期限切れ・接続成功の区分、試行回数、経過秒数、例外型、数値コード、エラー分類です。資格情報、任意の例外本文、生の ErrorId は記録しません。診断の保存に失敗した場合も処理を停止します。
 
 `VerifyBuild` は、L2 の設定完了後に再確認で停止した場合の検証専用経路です。元の BuildNested / Failed 記録を照合し、ソース再配置後に設定処理を呼ばず、VerifyBuild、Restricted、VerifyRestricted だけを実行します。ゲストの作成記録は Configured で、VM ID、BIOS GUID、ディスクと内部スイッチが一致し、応答ファイル削除・ライセンス確認が済んでいることを要求します。
 

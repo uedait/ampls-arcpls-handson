@@ -179,7 +179,8 @@ try {
         Start-VM -Name $VmName | Out-Null
     }
     $stage = 'PowerShellDirectReadiness'
-    $direct = Wait-NestedDirect -VmName $VmName -Credential $credential -TimeoutSeconds $ReadinessTimeoutSeconds
+    $direct = Wait-NestedDirect -VmName $VmName -Credential $credential -TimeoutSeconds $ReadinessTimeoutSeconds `
+        -InitialBoot -DiagnosticPath (Join-Path $guestDirectory 'direct-readiness.jsonl')
     $session = $direct.Session
     # Check guest identity before removing only known answer-file cache paths.
     $stage = 'AnswerFileCleanup'

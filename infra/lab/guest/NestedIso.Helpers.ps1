@@ -326,20 +326,70 @@ function Assert-NestedSha256 {
 }
 
 function Test-NestedBootTransportError {
-    param([System.Management.Automation.ErrorRecord]$Failure)
-    return ($Failure.Exception -is [System.Management.Automation.Remoting.PSRemotingTransportException] -and
-        $Failure.Exception.Message -match 'A remote session might have ended\.' -and
-        $Failure.Exception.Message -notmatch '(?i)credential|authentication|logon|access.*denied')
+    param([System.Management.Automation.ErrorRecord]$Failure, [switch]$InitialBoot)
+    if ($Failure.CategoryInfo.Category -in @('SecurityError','PermissionDenied','AuthenticationError')) { return $false }
+    $exception = $Failure.Exception
+    while ($exception) {
+        if ($exception.Message -match '(?i)credential|authentication|logon|access.*denied') { return $false }
+        foreach ($property in @('HResult','ErrorCode','NativeErrorCode')) {
+            $code = $exception.PSObject.Properties[$property]
+            if ($code -and $code.Value -is [int] -and
+                ($code.Value -band 0xffff) -in @(5,86,1326,1327,1328,1329,1330,1331,1385,1907,1909)) { return $false }
+        }
+        $exception = $exception.InnerException
+    }
+    if ($Failure.Exception -is [System.Management.Automation.Remoting.PSRemotingTransportException]) {
+        return ($Failure.Exception.Message -match 'A remote session might have ended\.')
+    }
+    return ($InitialBoot -and
+        $Failure.Exception -is [System.Management.Automation.Remoting.PSRemotingDataStructureException] -and
+        $null -eq $Failure.Exception.InnerException)
+}
+
+function Write-NestedDirectDiagnostic {
+    param(
+        [string]$Path, [ValidateSet('Retry','Rejected','Timeout','Opened')][string]$Status,
+        [int]$Attempt, [double]$ElapsedSeconds, [System.Management.Automation.ErrorRecord]$Failure
+    )
+    $record = [ordered]@{
+        RecordedAt=[DateTimeOffset]::UtcNow.ToString('o')
+        Status=$Status; Attempt=$Attempt; ElapsedSeconds=[math]::Round($ElapsedSeconds,3)
+        ExceptionType=$null; HResult=$null; ErrorCode=$null; Category=$null
+    }
+    if ($Failure) {
+        $record.ExceptionType=$Failure.Exception.GetType().FullName
+        $record.HResult=$Failure.Exception.HResult
+        $code=$Failure.Exception.PSObject.Properties['ErrorCode']
+        if ($code -and $code.Value -is [int]) { $record.ErrorCode=$code.Value }
+        $record.Category=[string]$Failure.CategoryInfo.Category
+    }
+    if ($Path) {
+        $record | ConvertTo-Json -Compress | Add-Content -LiteralPath $Path -Encoding UTF8 -ErrorAction Stop
+    } else {
+        Write-Information ('DIRECT_READINESS:' + ($record | ConvertTo-Json -Compress))
+    }
 }
 
 function Wait-NestedDirect {
-    param([string]$VmName, [pscredential]$Credential, [int]$TimeoutSeconds = 1800)
+    param(
+        [string]$VmName, [pscredential]$Credential,
+        [ValidateRange(1,7200)][int]$TimeoutSeconds = 1800, [switch]$InitialBoot, [string]$DiagnosticPath
+    )
+    if ($DiagnosticPath) { [void](Assert-NestedLocalPath $DiagnosticPath) }
     $watch = [Diagnostics.Stopwatch]::StartNew()
+    $attempt = 0
+    $protocolDeadline = $null
     do {
         $remaining = $TimeoutSeconds - $watch.Elapsed.TotalSeconds
-        if ($remaining -le 0) { throw 'PowerShell Direct readiness timed out; inspect the retained VM.' }
+        if ($null -ne $protocolDeadline) { $remaining = [Math]::Min($remaining, $protocolDeadline - $watch.Elapsed.TotalSeconds) }
+        if ($remaining -le 0) {
+            Write-NestedDirectDiagnostic -Path $DiagnosticPath -Status Timeout -Attempt $attempt -ElapsedSeconds $watch.Elapsed.TotalSeconds
+            throw 'PowerShell Direct readiness timed out; inspect the retained VM.'
+        }
+        $attempt++
         $pipeline = [PowerShell]::Create()
         $keepPipeline = $false
+        $openedSession = $null
         try {
             [void]$pipeline.AddCommand('New-PSSession')
             [void]$pipeline.AddParameter('VMName', $VmName)
@@ -348,6 +398,7 @@ function Wait-NestedDirect {
             $async = $pipeline.BeginInvoke()
             if (-not $async.AsyncWaitHandle.WaitOne([int]($remaining * 1000))) {
                 $pipeline.Stop()
+                Write-NestedDirectDiagnostic -Path $DiagnosticPath -Status Timeout -Attempt $attempt -ElapsedSeconds $watch.Elapsed.TotalSeconds
                 throw 'PowerShell Direct readiness timed out; inspect the retained VM.'
             }
             $result = $null
@@ -357,26 +408,47 @@ function Wait-NestedDirect {
                 if ($pipeline.Streams.Error.Count -eq 0) {
                     $reason = $pipeline.InvocationStateInfo.Reason
                     if ($reason -is [Management.Automation.RuntimeException]) { $failure = $reason.ErrorRecord }
-                    if (-not $failure) { throw }
+                    if (-not $failure) {
+                        Write-NestedDirectDiagnostic -Path $DiagnosticPath -Status Rejected -Attempt $attempt `
+                            -ElapsedSeconds $watch.Elapsed.TotalSeconds -Failure $_
+                        throw
+                    }
                 }
             }
             if ($pipeline.Streams.Error.Count -gt 0) { $failure = $pipeline.Streams.Error[0] }
             if (-not $failure) {
                 if (@($result).Count -ne 1 -or $result[0].State -ne 'Opened') {
+                    Write-NestedDirectDiagnostic -Path $DiagnosticPath -Status Rejected -Attempt $attempt -ElapsedSeconds $watch.Elapsed.TotalSeconds
                     throw 'PowerShell Direct returned no open session.'
                 }
+                $openedSession = $result[0]
                 # Keep the creating runspace alive until the caller closes the
                 # live session. Disposing it here could invalidate the session.
+                Write-NestedDirectDiagnostic -Path $DiagnosticPath -Status Opened -Attempt $attempt -ElapsedSeconds $watch.Elapsed.TotalSeconds
                 $keepPipeline = $true
                 return [pscustomobject]@{ Session = $result[0]; Pipeline = $pipeline }
             }
-            # Microsoft documents this specific English transport error as a boot/
-            # service readiness failure. Other locales fail closed, not guessed.
-            if (-not (Test-NestedBootTransportError $failure)) {
+            $retry = Test-NestedBootTransportError $failure -InitialBoot:$InitialBoot
+            if ($retry -and $failure.Exception -is [System.Management.Automation.Remoting.PSRemotingDataStructureException]) {
+                if ($null -eq $protocolDeadline) { $protocolDeadline = $watch.Elapsed.TotalSeconds + 180 }
+                if ($watch.Elapsed.TotalSeconds -ge $protocolDeadline) { $retry = $false }
+            }
+            $status = if ($retry) { 'Retry' } else { 'Rejected' }
+            Write-NestedDirectDiagnostic -Path $DiagnosticPath -Status $status -Attempt $attempt `
+                -ElapsedSeconds $watch.Elapsed.TotalSeconds -Failure $failure
+            if (-not $retry) {
                 throw $failure
             }
         }
-        finally { if (-not $keepPipeline) { $pipeline.Dispose() } }
-        Start-Sleep -Seconds ([int][Math]::Min(10, [Math]::Max(0, $TimeoutSeconds - $watch.Elapsed.TotalSeconds)))
+        finally {
+            if (-not $keepPipeline) {
+                try { if ($openedSession) { Remove-PSSession -Session $openedSession -ErrorAction Stop } }
+                finally { $pipeline.Dispose() }
+            }
+        }
+        $remaining = $TimeoutSeconds - $watch.Elapsed.TotalSeconds
+        if ($null -ne $protocolDeadline) { $remaining = [Math]::Min($remaining, $protocolDeadline - $watch.Elapsed.TotalSeconds) }
+        $pauseMilliseconds = [int][Math]::Floor([Math]::Min(10, [Math]::Max(0, $remaining)) * 1000)
+        if ($pauseMilliseconds -gt 0) { Start-Sleep -Milliseconds $pauseMilliseconds }
     } while ($true)
 }

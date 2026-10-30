@@ -231,14 +231,18 @@ $sdkCatch=${function:Wait-NestedDirect}.Ast.Find({
 Assert-True ($null -ne $sdkCatch) 'SDK terminating failures retain their invocation-reason error record'
 $sdkCatchBody=($sdkCatch.Body.Statements | ForEach-Object { $_.Extent.Text }) -join "`n"
 foreach ($case in @(
-    @{Message='A remote session might have ended.'; Retry=$true},
-    @{Message='A remote session might have ended. The credential is invalid.'; Retry=$false},
-    @{Message='Unclassified transport failure'; Retry=$false}
+    @{Message='A remote session might have ended.'; Type='Transport'; Initial=$false; Retry=$true},
+    @{Message='A remote session might have ended. The credential is invalid.'; Type='Transport'; Initial=$true; Retry=$false},
+    @{Message='Unclassified transport failure'; Type='Transport'; Initial=$true; Retry=$false},
+    @{Message='Synthetic initialization failure'; Type='Data'; Initial=$true; Retry=$true},
+    @{Message='Synthetic initialization failure'; Type='Data'; Initial=$false; Retry=$false},
+    @{Message='Access is denied.'; Type='Data'; Initial=$true; Retry=$false}
 )) {
     $pipeline=[PowerShell]::Create()
     try {
-        [void]$pipeline.AddScript('param($Message) $ErrorActionPreference="Stop"; function Invoke-SyntheticBootError { [CmdletBinding()] param($Text) $e=[System.Management.Automation.Remoting.PSRemotingTransportException]::new($Text); $r=[Management.Automation.ErrorRecord]::new($e,"SyntheticBoot",[Management.Automation.ErrorCategory]::OpenError,$null); $PSCmdlet.ThrowTerminatingError($r) }; Invoke-SyntheticBootError -Text $Message -ErrorAction Stop')
+        [void]$pipeline.AddScript('param($Message,$Type) $ErrorActionPreference="Stop"; function Invoke-SyntheticBootError { [CmdletBinding()] param($Text,$Kind) $e=if ($Kind -eq "Data") { [System.Management.Automation.Remoting.PSRemotingDataStructureException]::new($Text) } else { [System.Management.Automation.Remoting.PSRemotingTransportException]::new($Text) }; $r=[Management.Automation.ErrorRecord]::new($e,"SyntheticBoot",[Management.Automation.ErrorCategory]::OpenError,$null); $PSCmdlet.ThrowTerminatingError($r) }; Invoke-SyntheticBootError -Text $Message -Kind $Type -ErrorAction Stop')
         [void]$pipeline.AddParameter('Message',$case.Message)
+        [void]$pipeline.AddParameter('Type',$case.Type)
         $async=$pipeline.BeginInvoke()
         if (-not $async.AsyncWaitHandle.WaitOne(10000)) { $pipeline.Stop(); throw 'Synthetic SDK test timed out' }
         $failure=$null
@@ -246,8 +250,11 @@ foreach ($case in @(
         try { $null=$pipeline.EndInvoke($async) }
         catch { $caught=$true; . ([scriptblock]::Create($sdkCatchBody)) }
         Assert-True ($caught -and $pipeline.Streams.Error.Count -eq 0) 'The real SDK reproduces a stopping exception without a stream record'
-        Assert-True ($failure.Exception -is [System.Management.Automation.Remoting.PSRemotingTransportException]) 'The original transport error survives EndInvoke wrapping'
-        Assert-True ((Test-NestedBootTransportError $failure) -eq $case.Retry) 'Only the documented boot transport error is retryable; authentication and unknown failures stop'
+        $expectedType=if ($case.Type -eq 'Data') {
+            [System.Management.Automation.Remoting.PSRemotingDataStructureException]
+        } else { [System.Management.Automation.Remoting.PSRemotingTransportException] }
+        Assert-True ($failure.Exception -is $expectedType) 'The original remoting error survives EndInvoke wrapping'
+        Assert-True ((Test-NestedBootTransportError $failure -InitialBoot:$case.Initial) -eq $case.Retry) 'SDK remoting errors obey initial-boot and authentication gates'
     } finally { $pipeline.Dispose() }
 }
 foreach ($name in @('New-NestedLabFromIso.ps1','New-NestedLab.ps1','Invoke-LabRole.ps1')) {
@@ -440,6 +447,149 @@ Assert-True (Test-NestedBootTransportError (New-SyntheticTransportRecord 'A remo
 Assert-True (-not (Test-NestedBootTransportError (New-SyntheticTransportRecord 'The credential is invalid.'))) 'Do not retry invalid credentials'
 Assert-True (-not (Test-NestedBootTransportError (New-SyntheticTransportRecord 'Access is denied. A remote session might have ended.'))) 'Do not mask access denial'
 Assert-True (-not (Test-NestedBootTransportError (New-SyntheticTransportRecord 'Unknown failure'))) 'Do not retry unknown errors'
+function New-SyntheticProtocolRecord {
+    param([string]$Message='SyntheticSecretNeverLog', [Exception]$Inner,
+        [Management.Automation.ErrorCategory]$Category='OpenError')
+    $exception=[Management.Automation.Remoting.PSRemotingDataStructureException]::new($Message,$Inner)
+    return [Management.Automation.ErrorRecord]::new($exception,'SyntheticSecretErrorId',$Category,$null)
+}
+$protocol=New-SyntheticProtocolRecord
+Assert-True (Test-NestedBootTransportError $protocol -InitialBoot) 'Retry protocol initialization only during initial boot'
+Assert-True (-not (Test-NestedBootTransportError $protocol)) 'Normal connections reject data structure failures'
+foreach ($category in @('SecurityError','PermissionDenied','AuthenticationError')) {
+    Assert-True (-not (Test-NestedBootTransportError (New-SyntheticProtocolRecord -Category $category) -InitialBoot)) 'Structured authentication categories stop without English messages'
+}
+foreach ($code in @(5,86,1326,1327,1328,1329,1330,1331,1385,1907,1909)) {
+    $failure=New-SyntheticTransportRecord 'A remote session might have ended.'
+    $failure.Exception.ErrorCode=$code
+    Assert-True (-not (Test-NestedBootTransportError $failure -InitialBoot)) 'Structured authentication error codes stop'
+}
+$inner=[ComponentModel.Win32Exception]::new(1326)
+$failure=[Management.Automation.ErrorRecord]::new(
+    [Management.Automation.Remoting.PSRemotingTransportException]::new('A remote session might have ended.',$inner),
+    'SyntheticInnerAuthentication',[Management.Automation.ErrorCategory]::OpenError,$null)
+Assert-True (-not (Test-NestedBootTransportError $failure -InitialBoot)) 'Inner native logon failure stops'
+Assert-True (-not (Test-NestedBootTransportError (New-SyntheticProtocolRecord -Inner ([IO.InvalidDataException]::new('Synthetic'))) -InitialBoot)) 'Unknown inner protocol errors stop'
+Assert-True (-not (Test-NestedBootTransportError (New-SyntheticProtocolRecord -Message 'The credential is invalid.') -InitialBoot)) 'Protocol errors cannot mask credential rejection'
+$unknown=[Management.Automation.ErrorRecord]::new([InvalidOperationException]::new('Synthetic'),'Synthetic',
+    [Management.Automation.ErrorCategory]::OpenError,$null)
+Assert-True (-not (Test-NestedBootTransportError $unknown -InitialBoot)) 'Unknown exception types stop even during initial boot'
+
+function Invoke-TestDirectWait {
+    param([object[]]$Failures=@(), [switch]$InitialBoot, [int]$TimeoutSeconds=300,
+        [switch]$RepeatFailure, [int]$TimeoutAttempt=0, [switch]$LogFailure)
+    & {
+        param($Failures,$InitialBoot,$TimeoutSeconds,$RepeatFailure,$TimeoutAttempt,$LogFailure)
+        $script:directTest=@{
+            Failures=$Failures; Seconds=0; Pipelines=[Collections.Generic.List[object]]::new()
+            RepeatFailure=$RepeatFailure; TimeoutAttempt=$TimeoutAttempt; ClosedSessions=0; WaitMilliseconds=@()
+        }
+        function New-TestDirectWatch {
+            $watch=[pscustomobject]@{}
+            $watch | Add-Member -MemberType ScriptProperty -Name Elapsed -Value {
+                [timespan]::FromSeconds($script:directTest.Seconds)
+            }
+            return $watch
+        }
+        function New-TestDirectPipeline {
+            $index=$script:directTest.Pipelines.Count
+            $failure=if ($script:directTest.RepeatFailure) { $script:directTest.Failures[0] }
+                elseif ($index -lt $script:directTest.Failures.Count) { $script:directTest.Failures[$index] }
+                else { $null }
+            $handle=[pscustomobject]@{Attempt=$index+1}
+            $handle | Add-Member -MemberType ScriptMethod -Name WaitOne -Value {
+                param($milliseconds)
+                $script:directTest.WaitMilliseconds+= $milliseconds
+                if ($this.Attempt -eq $script:directTest.TimeoutAttempt) {
+                    $script:directTest.Seconds+= $milliseconds/1000
+                    return $false
+                }
+                return $true
+            }
+            $pipeline=[pscustomobject]@{
+                Failure=$failure; Streams=@{Error=@(if ($failure) { $failure })}
+                Handle=$handle; Disposed=$false; Stopped=$false
+            }
+            $pipeline | Add-Member -MemberType ScriptMethod -Name AddCommand -Value { param($name) return $this }
+            $pipeline | Add-Member -MemberType ScriptMethod -Name AddParameter -Value { param($name,$value) return $this }
+            $pipeline | Add-Member -MemberType ScriptMethod -Name BeginInvoke -Value { return [pscustomobject]@{AsyncWaitHandle=$this.Handle} }
+            $pipeline | Add-Member -MemberType ScriptMethod -Name EndInvoke -Value {
+                param($async)
+                if ($this.Failure) { throw $this.Failure.Exception }
+                return [pscustomobject]@{State='Opened'}
+            }
+            $pipeline | Add-Member -MemberType ScriptMethod -Name Stop -Value { $this.Stopped=$true }
+            $pipeline | Add-Member -MemberType ScriptMethod -Name Dispose -Value { $this.Disposed=$true }
+            $script:directTest.Pipelines.Add($pipeline)
+            return $pipeline
+        }
+        function Start-Sleep {
+            param([int]$Seconds,[int]$Milliseconds)
+            if ($PSBoundParameters.ContainsKey('Milliseconds')) { $script:directTest.Seconds+=$Milliseconds/1000 }
+            else { $script:directTest.Seconds+=$Seconds }
+        }
+        function Remove-PSSession { [CmdletBinding()]param($Session) $script:directTest.ClosedSessions++ }
+        $body=${function:Wait-NestedDirect}.ToString().Replace('[PowerShell]::Create()', '(New-TestDirectPipeline)').
+            Replace('[Diagnostics.Stopwatch]::StartNew()', '(New-TestDirectWatch)')
+        $directory=Join-Path ([IO.Path]::GetTempPath()) ('nested-direct-'+[guid]::NewGuid().ToString('N'))
+        [void](New-Item -ItemType Directory -Path $directory)
+        $path=if ($LogFailure) { $directory } else { Join-Path $directory 'direct.jsonl' }
+        $result=$null
+        $caught=$null
+        try {
+            try { $result=& ([scriptblock]::Create($body)) -VmName Synthetic -InitialBoot:$InitialBoot -TimeoutSeconds $TimeoutSeconds -DiagnosticPath $path }
+            catch { $caught=$_ }
+            $records=@(if (Test-Path -LiteralPath $path -PathType Leaf) { Get-Content -LiteralPath $path | ForEach-Object { $_ | ConvertFrom-Json } })
+            return @{
+                Succeeded=($null -ne $result); Failed=($null -ne $caught); Records=$records
+                SuccessfulPipelineRetained=($null -ne $result -and -not $result.Pipeline.Disposed)
+                Seconds=$script:directTest.Seconds; Pipelines=@($script:directTest.Pipelines.ToArray())
+                ClosedSessions=$script:directTest.ClosedSessions; WaitMilliseconds=$script:directTest.WaitMilliseconds
+            }
+        } finally {
+            if ($result) { Remove-PSSession -Session $result.Session; $result.Pipeline.Dispose() }
+            if (Test-Path -LiteralPath $path -PathType Leaf) { Remove-Item -LiteralPath $path -Force }
+            Remove-Item -LiteralPath $directory -Force
+            $script:directTest=$null
+        }
+    } $Failures $InitialBoot $TimeoutSeconds $RepeatFailure $TimeoutAttempt $LogFailure
+}
+$wait=Invoke-TestDirectWait -Failures @($protocol) -InitialBoot
+Assert-True ($wait.Succeeded -and $wait.Seconds -eq 10 -and $wait.Records[0].Status -eq 'Retry' -and $wait.Records[1].Status -eq 'Opened') 'Initial protocol failure retries at ten seconds then opens a session'
+Assert-True ($wait.Pipelines[0].Disposed) 'Failed attempt releases its pipeline'
+Assert-True ($wait.SuccessfulPipelineRetained) 'Successful session retains its creating pipeline until the caller closes it'
+Assert-True ($wait.Records[0].Attempt -eq 1 -and $wait.Records[1].Attempt -eq 2) 'Diagnostic attempt numbers are retained'
+$diagnostic=$wait.Records | ConvertTo-Json -Depth 5
+Assert-True (-not $diagnostic.Contains('SyntheticSecretNeverLog') -and -not $diagnostic.Contains('SyntheticSecretErrorId')) 'Diagnostics contain no arbitrary exception message or error ID'
+$wait=Invoke-TestDirectWait -Failures @($protocol)
+Assert-True ($wait.Failed -and $wait.Pipelines.Count -eq 1 -and $wait.Seconds -eq 0 -and $wait.Records[0].Status -eq 'Rejected') 'Ordinary connections fail immediately on protocol errors'
+$wait=Invoke-TestDirectWait -Failures @((New-SyntheticProtocolRecord -Category AuthenticationError)) -InitialBoot
+Assert-True ($wait.Failed -and $wait.Pipelines.Count -eq 1 -and $wait.Seconds -eq 0) 'Initial boot does not retry structured authentication failures'
+$wait=Invoke-TestDirectWait -Failures @($unknown) -InitialBoot
+Assert-True ($wait.Failed -and $wait.Seconds -eq 0) 'Unknown exceptions fail without sleeping'
+$wait=Invoke-TestDirectWait -Failures @($protocol) -InitialBoot -RepeatFailure
+Assert-True ($wait.Failed -and $wait.Seconds -eq 180 -and $wait.Records[-1].Status -eq 'Timeout') 'Repeated protocol failures stop at three minutes'
+Assert-True (@($wait.Pipelines | Where-Object { -not $_.Disposed }).Count -eq 0) 'All exhausted attempts dispose their pipelines'
+$wait=Invoke-TestDirectWait -Failures @($protocol) -InitialBoot -RepeatFailure -TimeoutSeconds 25
+Assert-True ($wait.Failed -and $wait.Seconds -eq 25) 'The total timeout takes priority over the protocol retry window'
+$wait=Invoke-TestDirectWait -Failures @($protocol) -InitialBoot -TimeoutAttempt 2
+Assert-True ($wait.Failed -and $wait.Seconds -eq 180 -and $wait.WaitMilliseconds[1] -eq 170000 -and $wait.Pipelines[1].Stopped) 'An in-flight retry cannot exceed the three-minute deadline'
+$transport=New-SyntheticTransportRecord 'A remote session might have ended.'
+$wait=Invoke-TestDirectWait -Failures @($transport)
+Assert-True ($wait.Succeeded -and $wait.Seconds -eq 10) 'Existing transport retries remain available without InitialBoot'
+$mixedFailures=@($protocol)+@(1..18 | ForEach-Object { $transport })
+$wait=Invoke-TestDirectWait -Failures $mixedFailures -InitialBoot
+Assert-True ($wait.Failed -and $wait.Seconds -eq 180 -and $wait.Pipelines.Count -eq 18) 'Transport failures cannot reset the initial protocol deadline'
+$wait=Invoke-TestDirectWait -TimeoutAttempt 1 -TimeoutSeconds 25
+Assert-True ($wait.Failed -and $wait.Seconds -eq 25 -and $wait.Pipelines[0].Stopped -and $wait.Pipelines[0].Disposed) 'An in-flight initial attempt is stopped and disposed at the total deadline'
+$wait=Invoke-TestDirectWait -LogFailure
+Assert-True ($wait.Failed -and $wait.ClosedSessions -eq 1 -and $wait.Pipelines[0].Disposed) 'Diagnostic persistence failure closes the newly opened session and fails explicitly'
+$readinessCall=@($builderAst.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'Wait-NestedDirect'
+},$true))
+Assert-True ($readinessCall.Count -eq 1 -and $readinessCall[0].Extent.Text.Contains('-InitialBoot') -and
+    $readinessCall[0].Extent.Text.Contains('direct-readiness.jsonl')) 'The ISO builder and validated initial continuation share the bounded initial-boot wait'
 $xml = $null
 $credential = $null
 $secure = $null
