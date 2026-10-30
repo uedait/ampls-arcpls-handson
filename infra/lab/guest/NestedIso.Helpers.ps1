@@ -325,36 +325,54 @@ function Assert-NestedSha256 {
     }
 }
 
-function Test-NestedBootTransportError {
+function Get-NestedBootConnectionDecision {
     param([System.Management.Automation.ErrorRecord]$Failure, [switch]$InitialBoot)
-    if ($Failure.CategoryInfo.Category -in @('SecurityError','PermissionDenied','AuthenticationError')) { return $false }
+    $authCategories=@('SecurityError','PermissionDenied','AuthenticationError')
+    if ($Failure.CategoryInfo.Category -in $authCategories) { return 'AuthenticationCategory' }
     $exception = $Failure.Exception
     while ($exception) {
-        if ($exception.Message -match '(?i)credential|authentication|logon|access.*denied') { return $false }
+        if ($exception -is [Management.Automation.RuntimeException] -and
+            $exception.ErrorRecord.CategoryInfo.Category -in $authCategories) { return 'AuthenticationCategory' }
         foreach ($property in @('HResult','ErrorCode','NativeErrorCode')) {
             $code = $exception.PSObject.Properties[$property]
             if ($code -and $code.Value -is [int] -and
-                ($code.Value -band 0xffff) -in @(5,86,1326,1327,1328,1329,1330,1331,1385,1907,1909)) { return $false }
+                ($code.Value -band 0xffff) -in @(5,86,1326,1327,1328,1329,1330,1331,1385,1907,1909)) { return 'AuthenticationCode' }
+        }
+        if ($exception.Message -match '(?i)(credential|password).*(invalid|incorrect|reject)|(invalid|incorrect).*(credential|password)|(authentication|logon).*(fail|reject|denied)|access.*denied|unauthori[sz]ed') {
+            return 'AuthenticationMessage'
         }
         $exception = $exception.InnerException
     }
-    if ($Failure.Exception -is [System.Management.Automation.Remoting.PSRemotingTransportException]) {
-        return ($Failure.Exception.Message -match 'A remote session might have ended\.')
+    if ($InitialBoot -and (
+        $Failure.Exception -is [System.Management.Automation.Remoting.PSRemotingTransportException] -or
+        $Failure.Exception -is [System.Management.Automation.Remoting.PSRemotingDataStructureException])) {
+        return 'InitialBootConnection'
     }
-    return ($InitialBoot -and
-        $Failure.Exception -is [System.Management.Automation.Remoting.PSRemotingDataStructureException] -and
-        $null -eq $Failure.Exception.InnerException)
+    if ($Failure.Exception -is [System.Management.Automation.Remoting.PSRemotingTransportException]) {
+        if ($Failure.Exception.Message -match 'A remote session might have ended\.') { return 'BootTransport' }
+        return 'UnclassifiedTransport'
+    }
+    if ($Failure.Exception -is [System.Management.Automation.Remoting.PSRemotingDataStructureException]) { return 'InitialBootRequired' }
+    return 'NonConnectionError'
+}
+
+function Test-NestedBootTransportError {
+    param([System.Management.Automation.ErrorRecord]$Failure, [switch]$InitialBoot)
+    return ((Get-NestedBootConnectionDecision $Failure -InitialBoot:$InitialBoot) -in @('InitialBootConnection','BootTransport'))
 }
 
 function Write-NestedDirectDiagnostic {
     param(
         [string]$Path, [ValidateSet('Retry','Rejected','Timeout','Opened')][string]$Status,
-        [int]$Attempt, [double]$ElapsedSeconds, [System.Management.Automation.ErrorRecord]$Failure
+        [int]$Attempt, [double]$ElapsedSeconds, [System.Management.Automation.ErrorRecord]$Failure,
+        [ValidateSet('NotEvaluated','AuthenticationCategory','AuthenticationMessage','AuthenticationCode',
+            'InitialBootConnection','BootTransport','UnclassifiedTransport','InitialBootRequired','NonConnectionError')]
+        [string]$Decision='NotEvaluated'
     )
     $record = [ordered]@{
         RecordedAt=[DateTimeOffset]::UtcNow.ToString('o')
         Status=$Status; Attempt=$Attempt; ElapsedSeconds=[math]::Round($ElapsedSeconds,3)
-        ExceptionType=$null; HResult=$null; ErrorCode=$null; Category=$null
+        Decision=$Decision; ExceptionType=$null; HResult=$null; ErrorCode=$null; Category=$null; ExceptionChain=@()
     }
     if ($Failure) {
         $record.ExceptionType=$Failure.Exception.GetType().FullName
@@ -362,11 +380,21 @@ function Write-NestedDirectDiagnostic {
         $code=$Failure.Exception.PSObject.Properties['ErrorCode']
         if ($code -and $code.Value -is [int]) { $record.ErrorCode=$code.Value }
         $record.Category=[string]$Failure.CategoryInfo.Category
+        $exception=$Failure.Exception
+        while ($exception) {
+            $entry=[ordered]@{ExceptionType=$exception.GetType().FullName;HResult=$exception.HResult;ErrorCode=$null;NativeErrorCode=$null}
+            foreach ($name in @('ErrorCode','NativeErrorCode')) {
+                $code=$exception.PSObject.Properties[$name]
+                if ($code -and $code.Value -is [int]) { $entry[$name]=$code.Value }
+            }
+            $record.ExceptionChain+= $entry
+            $exception=$exception.InnerException
+        }
     }
     if ($Path) {
-        $record | ConvertTo-Json -Compress | Add-Content -LiteralPath $Path -Encoding UTF8 -ErrorAction Stop
+        $record | ConvertTo-Json -Compress -Depth 5 | Add-Content -LiteralPath $Path -Encoding UTF8 -ErrorAction Stop
     } else {
-        Write-Information ('DIRECT_READINESS:' + ($record | ConvertTo-Json -Compress))
+        Write-Information ('DIRECT_READINESS:' + ($record | ConvertTo-Json -Compress -Depth 5))
     }
 }
 
@@ -376,12 +404,11 @@ function Wait-NestedDirect {
         [ValidateRange(1,7200)][int]$TimeoutSeconds = 1800, [switch]$InitialBoot, [string]$DiagnosticPath
     )
     if ($DiagnosticPath) { [void](Assert-NestedLocalPath $DiagnosticPath) }
+    $limit = if ($InitialBoot) { [Math]::Min($TimeoutSeconds,180) } else { $TimeoutSeconds }
     $watch = [Diagnostics.Stopwatch]::StartNew()
     $attempt = 0
-    $protocolDeadline = $null
     do {
-        $remaining = $TimeoutSeconds - $watch.Elapsed.TotalSeconds
-        if ($null -ne $protocolDeadline) { $remaining = [Math]::Min($remaining, $protocolDeadline - $watch.Elapsed.TotalSeconds) }
+        $remaining = $limit - $watch.Elapsed.TotalSeconds
         if ($remaining -le 0) {
             Write-NestedDirectDiagnostic -Path $DiagnosticPath -Status Timeout -Attempt $attempt -ElapsedSeconds $watch.Elapsed.TotalSeconds
             throw 'PowerShell Direct readiness timed out; inspect the retained VM.'
@@ -428,14 +455,11 @@ function Wait-NestedDirect {
                 $keepPipeline = $true
                 return [pscustomobject]@{ Session = $result[0]; Pipeline = $pipeline }
             }
-            $retry = Test-NestedBootTransportError $failure -InitialBoot:$InitialBoot
-            if ($retry -and $failure.Exception -is [System.Management.Automation.Remoting.PSRemotingDataStructureException]) {
-                if ($null -eq $protocolDeadline) { $protocolDeadline = $watch.Elapsed.TotalSeconds + 180 }
-                if ($watch.Elapsed.TotalSeconds -ge $protocolDeadline) { $retry = $false }
-            }
+            $decision = Get-NestedBootConnectionDecision $failure -InitialBoot:$InitialBoot
+            $retry = $decision -in @('InitialBootConnection','BootTransport')
             $status = if ($retry) { 'Retry' } else { 'Rejected' }
             Write-NestedDirectDiagnostic -Path $DiagnosticPath -Status $status -Attempt $attempt `
-                -ElapsedSeconds $watch.Elapsed.TotalSeconds -Failure $failure
+                -ElapsedSeconds $watch.Elapsed.TotalSeconds -Failure $failure -Decision $decision
             if (-not $retry) {
                 throw $failure
             }
@@ -446,8 +470,7 @@ function Wait-NestedDirect {
                 finally { $pipeline.Dispose() }
             }
         }
-        $remaining = $TimeoutSeconds - $watch.Elapsed.TotalSeconds
-        if ($null -ne $protocolDeadline) { $remaining = [Math]::Min($remaining, $protocolDeadline - $watch.Elapsed.TotalSeconds) }
+        $remaining = $limit - $watch.Elapsed.TotalSeconds
         $pauseMilliseconds = [int][Math]::Floor([Math]::Min(10, [Math]::Max(0, $remaining)) * 1000)
         if ($pauseMilliseconds -gt 0) { Start-Sleep -Milliseconds $pauseMilliseconds }
     } while ($true)

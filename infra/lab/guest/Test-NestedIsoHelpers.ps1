@@ -231,18 +231,22 @@ $sdkCatch=${function:Wait-NestedDirect}.Ast.Find({
 Assert-True ($null -ne $sdkCatch) 'SDK terminating failures retain their invocation-reason error record'
 $sdkCatchBody=($sdkCatch.Body.Statements | ForEach-Object { $_.Extent.Text }) -join "`n"
 foreach ($case in @(
-    @{Message='A remote session might have ended.'; Type='Transport'; Initial=$false; Retry=$true},
-    @{Message='A remote session might have ended. The credential is invalid.'; Type='Transport'; Initial=$true; Retry=$false},
-    @{Message='Unclassified transport failure'; Type='Transport'; Initial=$true; Retry=$false},
-    @{Message='Synthetic initialization failure'; Type='Data'; Initial=$true; Retry=$true},
-    @{Message='Synthetic initialization failure'; Type='Data'; Initial=$false; Retry=$false},
-    @{Message='Access is denied.'; Type='Data'; Initial=$true; Retry=$false}
+    @{Message='A remote session might have ended.'; Type='Transport'; Inner='None'; Initial=$false; Retry=$true},
+    @{Message='A remote session might have ended. The credential is invalid.'; Type='Transport'; Inner='None'; Initial=$true; Retry=$false},
+    @{Message='Unclassified transport failure'; Type='Transport'; Inner='None'; Initial=$true; Retry=$true},
+    @{Message='Unclassified transport failure'; Type='Transport'; Inner='None'; Initial=$false; Retry=$false},
+    @{Message='Synthetic initialization failure'; Type='Data'; Inner='None'; Initial=$true; Retry=$true},
+    @{Message='Synthetic initialization failure'; Type='Data'; Inner='Unknown'; Initial=$true; Retry=$true},
+    @{Message='Synthetic initialization failure'; Type='Data'; Inner='Authentication'; Initial=$true; Retry=$false},
+    @{Message='Synthetic initialization failure'; Type='Data'; Inner='None'; Initial=$false; Retry=$false},
+    @{Message='Access is denied.'; Type='Data'; Inner='None'; Initial=$true; Retry=$false}
 )) {
     $pipeline=[PowerShell]::Create()
     try {
-        [void]$pipeline.AddScript('param($Message,$Type) $ErrorActionPreference="Stop"; function Invoke-SyntheticBootError { [CmdletBinding()] param($Text,$Kind) $e=if ($Kind -eq "Data") { [System.Management.Automation.Remoting.PSRemotingDataStructureException]::new($Text) } else { [System.Management.Automation.Remoting.PSRemotingTransportException]::new($Text) }; $r=[Management.Automation.ErrorRecord]::new($e,"SyntheticBoot",[Management.Automation.ErrorCategory]::OpenError,$null); $PSCmdlet.ThrowTerminatingError($r) }; Invoke-SyntheticBootError -Text $Message -Kind $Type -ErrorAction Stop')
+        [void]$pipeline.AddScript('param($Message,$Type,$Inner) $ErrorActionPreference="Stop"; function Invoke-SyntheticBootError { [CmdletBinding()] param($Text,$Kind,$InnerKind) $inner=if ($InnerKind -eq "Authentication") { [ComponentModel.Win32Exception]::new(1326) } elseif ($InnerKind -eq "Unknown") { [IO.InvalidDataException]::new("Synthetic nested failure") } else { $null }; $e=if ($Kind -eq "Data") { [System.Management.Automation.Remoting.PSRemotingDataStructureException]::new($Text,$inner) } else { [System.Management.Automation.Remoting.PSRemotingTransportException]::new($Text,$inner) }; $r=[Management.Automation.ErrorRecord]::new($e,"SyntheticBoot",[Management.Automation.ErrorCategory]::OpenError,$null); $PSCmdlet.ThrowTerminatingError($r) }; Invoke-SyntheticBootError -Text $Message -Kind $Type -InnerKind $Inner -ErrorAction Stop')
         [void]$pipeline.AddParameter('Message',$case.Message)
         [void]$pipeline.AddParameter('Type',$case.Type)
+        [void]$pipeline.AddParameter('Inner',$case.Inner)
         $async=$pipeline.BeginInvoke()
         if (-not $async.AsyncWaitHandle.WaitOne(10000)) { $pipeline.Stop(); throw 'Synthetic SDK test timed out' }
         $failure=$null
@@ -469,20 +473,29 @@ $failure=[Management.Automation.ErrorRecord]::new(
     [Management.Automation.Remoting.PSRemotingTransportException]::new('A remote session might have ended.',$inner),
     'SyntheticInnerAuthentication',[Management.Automation.ErrorCategory]::OpenError,$null)
 Assert-True (-not (Test-NestedBootTransportError $failure -InitialBoot)) 'Inner native logon failure stops'
-Assert-True (-not (Test-NestedBootTransportError (New-SyntheticProtocolRecord -Inner ([IO.InvalidDataException]::new('Synthetic'))) -InitialBoot)) 'Unknown inner protocol errors stop'
+$nestedProtocol=New-SyntheticProtocolRecord -Inner ([IO.InvalidDataException]::new('SyntheticInnerSecretNeverLog'))
+Assert-True (Test-NestedBootTransportError $nestedProtocol -InitialBoot) 'Initial connection retries do not depend on the presence of inner exceptions'
+Assert-True (-not (Test-NestedBootTransportError $nestedProtocol)) 'Normal connections still reject nested protocol failures'
+Assert-True (Test-NestedBootTransportError (New-SyntheticTransportRecord 'Synthetic localized connection failure') -InitialBoot) 'Initial transport retries do not depend on English wording'
+Assert-True (Test-NestedBootTransportError (New-SyntheticProtocolRecord -Message 'Preparing credentials and authentication services') -InitialBoot) 'Mentioning credentials alone does not mean rejection'
 Assert-True (-not (Test-NestedBootTransportError (New-SyntheticProtocolRecord -Message 'The credential is invalid.') -InitialBoot)) 'Protocol errors cannot mask credential rejection'
+$nestedAuth=New-SyntheticProtocolRecord -Inner ([ComponentModel.Win32Exception]::new(1326))
+Assert-True ((Get-NestedBootConnectionDecision $nestedAuth -InitialBoot) -eq 'AuthenticationCode') 'Inner authentication codes take priority over initial-boot retry'
+Assert-True ((Get-NestedBootConnectionDecision (New-SyntheticProtocolRecord -Category PermissionDenied) -InitialBoot) -eq 'AuthenticationCategory') 'Authentication categories have a fixed diagnostic reason'
+Assert-True ((Get-NestedBootConnectionDecision (New-SyntheticProtocolRecord -Message 'Authentication failed') -InitialBoot) -eq 'AuthenticationMessage') 'Explicit authentication rejection has a fixed diagnostic reason'
 $unknown=[Management.Automation.ErrorRecord]::new([InvalidOperationException]::new('Synthetic'),'Synthetic',
     [Management.Automation.ErrorCategory]::OpenError,$null)
 Assert-True (-not (Test-NestedBootTransportError $unknown -InitialBoot)) 'Unknown exception types stop even during initial boot'
 
 function Invoke-TestDirectWait {
     param([object[]]$Failures=@(), [switch]$InitialBoot, [int]$TimeoutSeconds=300,
-        [switch]$RepeatFailure, [int]$TimeoutAttempt=0, [switch]$LogFailure)
+        [switch]$RepeatFailure, [int]$TimeoutAttempt=0, [switch]$LogFailure, [int]$FirstAttemptSeconds=0)
     & {
-        param($Failures,$InitialBoot,$TimeoutSeconds,$RepeatFailure,$TimeoutAttempt,$LogFailure)
+        param($Failures,$InitialBoot,$TimeoutSeconds,$RepeatFailure,$TimeoutAttempt,$LogFailure,$FirstAttemptSeconds)
         $script:directTest=@{
             Failures=$Failures; Seconds=0; Pipelines=[Collections.Generic.List[object]]::new()
             RepeatFailure=$RepeatFailure; TimeoutAttempt=$TimeoutAttempt; ClosedSessions=0; WaitMilliseconds=@()
+            FirstAttemptSeconds=$FirstAttemptSeconds
         }
         function New-TestDirectWatch {
             $watch=[pscustomobject]@{}
@@ -504,6 +517,7 @@ function Invoke-TestDirectWait {
                     $script:directTest.Seconds+= $milliseconds/1000
                     return $false
                 }
+                if ($this.Attempt -eq 1) { $script:directTest.Seconds+=$script:directTest.FirstAttemptSeconds }
                 return $true
             }
             $pipeline=[pscustomobject]@{
@@ -552,7 +566,7 @@ function Invoke-TestDirectWait {
             Remove-Item -LiteralPath $directory -Force
             $script:directTest=$null
         }
-    } $Failures $InitialBoot $TimeoutSeconds $RepeatFailure $TimeoutAttempt $LogFailure
+    } $Failures $InitialBoot $TimeoutSeconds $RepeatFailure $TimeoutAttempt $LogFailure $FirstAttemptSeconds
 }
 $wait=Invoke-TestDirectWait -Failures @($protocol) -InitialBoot
 Assert-True ($wait.Succeeded -and $wait.Seconds -eq 10 -and $wait.Records[0].Status -eq 'Retry' -and $wait.Records[1].Status -eq 'Opened') 'Initial protocol failure retries at ten seconds then opens a session'
@@ -561,6 +575,17 @@ Assert-True ($wait.SuccessfulPipelineRetained) 'Successful session retains its c
 Assert-True ($wait.Records[0].Attempt -eq 1 -and $wait.Records[1].Attempt -eq 2) 'Diagnostic attempt numbers are retained'
 $diagnostic=$wait.Records | ConvertTo-Json -Depth 5
 Assert-True (-not $diagnostic.Contains('SyntheticSecretNeverLog') -and -not $diagnostic.Contains('SyntheticSecretErrorId')) 'Diagnostics contain no arbitrary exception message or error ID'
+$wait=Invoke-TestDirectWait -Failures @($nestedProtocol) -InitialBoot
+Assert-True ($wait.Succeeded -and $wait.Seconds -eq 10 -and $wait.Records[0].Decision -eq 'InitialBootConnection') 'Nested protocol failures retry and report the decision'
+Assert-True ($wait.Records[0].ExceptionChain.Count -eq 2 -and
+    $wait.Records[0].ExceptionChain[1].ExceptionType -eq 'System.IO.InvalidDataException') 'Diagnostic output retains the original exception hierarchy'
+$diagnostic=$wait.Records | ConvertTo-Json -Depth 6
+Assert-True (-not $diagnostic.Contains('SyntheticInnerSecretNeverLog') -and -not $diagnostic.Contains('SyntheticSecretErrorId')) 'Inner exception messages and raw IDs are not logged'
+$wait=Invoke-TestDirectWait -Failures @($nestedAuth) -InitialBoot
+Assert-True ($wait.Failed -and $wait.Seconds -eq 0 -and $wait.Records[0].Decision -eq 'AuthenticationCode' -and
+    $wait.Records[0].ExceptionChain[1].NativeErrorCode -eq 1326) 'Inner authentication rejection stops immediately and preserves the numeric cause'
+$wait=Invoke-TestDirectWait -Failures @((New-SyntheticTransportRecord 'Synthetic localized connection failure')) -InitialBoot
+Assert-True ($wait.Succeeded -and $wait.Seconds -eq 10) 'An arbitrary transport message retries through the full wait loop'
 $wait=Invoke-TestDirectWait -Failures @($protocol)
 Assert-True ($wait.Failed -and $wait.Pipelines.Count -eq 1 -and $wait.Seconds -eq 0 -and $wait.Records[0].Status -eq 'Rejected') 'Ordinary connections fail immediately on protocol errors'
 $wait=Invoke-TestDirectWait -Failures @((New-SyntheticProtocolRecord -Category AuthenticationError)) -InitialBoot
@@ -570,6 +595,8 @@ Assert-True ($wait.Failed -and $wait.Seconds -eq 0) 'Unknown exceptions fail wit
 $wait=Invoke-TestDirectWait -Failures @($protocol) -InitialBoot -RepeatFailure
 Assert-True ($wait.Failed -and $wait.Seconds -eq 180 -and $wait.Records[-1].Status -eq 'Timeout') 'Repeated protocol failures stop at three minutes'
 Assert-True (@($wait.Pipelines | Where-Object { -not $_.Disposed }).Count -eq 0) 'All exhausted attempts dispose their pipelines'
+$wait=Invoke-TestDirectWait -Failures @($nestedProtocol) -InitialBoot -RepeatFailure -FirstAttemptSeconds 30
+Assert-True ($wait.Failed -and $wait.Seconds -eq 180 -and $wait.Pipelines.Count -eq 15) 'The initial three-minute budget includes time spent in the first connection attempt'
 $wait=Invoke-TestDirectWait -Failures @($protocol) -InitialBoot -RepeatFailure -TimeoutSeconds 25
 Assert-True ($wait.Failed -and $wait.Seconds -eq 25) 'The total timeout takes priority over the protocol retry window'
 $wait=Invoke-TestDirectWait -Failures @($protocol) -InitialBoot -TimeoutAttempt 2
@@ -577,9 +604,13 @@ Assert-True ($wait.Failed -and $wait.Seconds -eq 180 -and $wait.WaitMilliseconds
 $transport=New-SyntheticTransportRecord 'A remote session might have ended.'
 $wait=Invoke-TestDirectWait -Failures @($transport)
 Assert-True ($wait.Succeeded -and $wait.Seconds -eq 10) 'Existing transport retries remain available without InitialBoot'
+$wait=Invoke-TestDirectWait -Failures @($transport) -RepeatFailure -TimeoutSeconds 240
+Assert-True ($wait.Failed -and $wait.Seconds -eq 240) 'Normal connection waits retain their configured timeout beyond three minutes'
 $mixedFailures=@($protocol)+@(1..18 | ForEach-Object { $transport })
 $wait=Invoke-TestDirectWait -Failures $mixedFailures -InitialBoot
 Assert-True ($wait.Failed -and $wait.Seconds -eq 180 -and $wait.Pipelines.Count -eq 18) 'Transport failures cannot reset the initial protocol deadline'
+$wait=Invoke-TestDirectWait -InitialBoot -TimeoutAttempt 1
+Assert-True ($wait.Failed -and $wait.Seconds -eq 180 -and $wait.WaitMilliseconds[0] -eq 180000) 'A hanging first initial-boot attempt is bounded by three minutes'
 $wait=Invoke-TestDirectWait -TimeoutAttempt 1 -TimeoutSeconds 25
 Assert-True ($wait.Failed -and $wait.Seconds -eq 25 -and $wait.Pipelines[0].Stopped -and $wait.Pipelines[0].Disposed) 'An in-flight initial attempt is stopped and disposed at the total deadline'
 $wait=Invoke-TestDirectWait -LogFailure
