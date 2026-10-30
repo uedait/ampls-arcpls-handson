@@ -405,11 +405,10 @@ function Wait-NestedDirect {
         [ValidateRange(1,7200)][int]$TimeoutSeconds = 1800, [switch]$InitialBoot, [string]$DiagnosticPath
     )
     if ($DiagnosticPath) { [void](Assert-NestedLocalPath $DiagnosticPath) }
-    $limit = if ($InitialBoot) { [Math]::Min($TimeoutSeconds,180) } else { $TimeoutSeconds }
     $watch = [Diagnostics.Stopwatch]::StartNew()
     $attempt = 0
     do {
-        $remaining = $limit - $watch.Elapsed.TotalSeconds
+        $remaining = $TimeoutSeconds - $watch.Elapsed.TotalSeconds
         if ($remaining -le 0) {
             Write-NestedDirectDiagnostic -Path $DiagnosticPath -Status Timeout -Attempt $attempt -ElapsedSeconds $watch.Elapsed.TotalSeconds
             throw 'PowerShell Direct readiness timed out; inspect the retained VM.'
@@ -471,7 +470,7 @@ function Wait-NestedDirect {
                 finally { $pipeline.Dispose() }
             }
         }
-        $remaining = $limit - $watch.Elapsed.TotalSeconds
+        $remaining = $TimeoutSeconds - $watch.Elapsed.TotalSeconds
         $pauseMilliseconds = [int][Math]::Floor([Math]::Min(10, [Math]::Max(0, $remaining)) * 1000)
         if ($pauseMilliseconds -gt 0) { Start-Sleep -Milliseconds $pauseMilliseconds }
     } while ($true)

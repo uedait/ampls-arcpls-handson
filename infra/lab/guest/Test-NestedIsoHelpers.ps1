@@ -612,28 +612,39 @@ $wait=Invoke-TestDirectWait -Failures @($observedBootFailure,$directAuth) -Initi
 Assert-True ($wait.Succeeded -and $wait.Pipelines.Count -eq 3 -and $wait.Seconds -eq 50 -and
     @($wait.Records | Where-Object Status -eq 'Retry').Count -eq 2 -and $wait.Records[-1].Status -eq 'Opened') 'The observed boot transport then PSDirect credential rejection sequence reaches an open session without intervention'
 $wait=Invoke-TestDirectWait -Failures @($directAuth) -InitialBoot -RepeatFailure
-Assert-True ($wait.Failed -and $wait.Seconds -eq 180 -and $wait.Records[-1].Status -eq 'Timeout') 'Persistent initial PSDirect failures stop at the existing deadline'
+Assert-True ($wait.Failed -and $wait.Seconds -eq 300 -and $wait.Records[-1].Status -eq 'Timeout') 'Persistent initial PSDirect failures stop at the configured deadline'
+$lateReadyFailures=@(1..19 | ForEach-Object { $directAuth })
+$wait=Invoke-TestDirectWait -Failures $lateReadyFailures -InitialBoot
+Assert-True ($wait.Succeeded -and $wait.Seconds -eq 190 -and $wait.Records[-1].Status -eq 'Opened') 'Initial setup can connect successfully after the former three-minute cutoff'
+$timeoutParameter=@(${function:Wait-NestedDirect}.Ast.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.ParameterAst] -and $node.Name.VariablePath.UserPath -eq 'TimeoutSeconds'
+},$true))
+Assert-True ($timeoutParameter.Count -eq 1 -and $timeoutParameter[0].DefaultValue.Value -eq 1800) 'The shared connection wait retains its thirty-minute default'
+$timeoutParameter=@($builderAst.ParamBlock.Parameters |
+    Where-Object { $_.Name.VariablePath.UserPath -eq 'ReadinessTimeoutSeconds' })
+Assert-True ($timeoutParameter.Count -eq 1 -and $timeoutParameter[0].DefaultValue.Value -eq 1800) 'The ISO builder supplies the same thirty-minute default'
 $wait=Invoke-TestDirectWait -Failures @($unknown) -InitialBoot
 Assert-True ($wait.Failed -and $wait.Seconds -eq 0) 'Unknown exceptions fail without sleeping'
 $wait=Invoke-TestDirectWait -Failures @($protocol) -InitialBoot -RepeatFailure
-Assert-True ($wait.Failed -and $wait.Seconds -eq 180 -and $wait.Records[-1].Status -eq 'Timeout') 'Repeated protocol failures stop at three minutes'
+Assert-True ($wait.Failed -and $wait.Seconds -eq 300 -and $wait.Records[-1].Status -eq 'Timeout') 'Repeated protocol failures use the configured timeout without a short initial cap'
 Assert-True (@($wait.Pipelines | Where-Object { -not $_.Disposed }).Count -eq 0) 'All exhausted attempts dispose their pipelines'
 $wait=Invoke-TestDirectWait -Failures @($nestedProtocol) -InitialBoot -RepeatFailure -FirstAttemptSeconds 30
-Assert-True ($wait.Failed -and $wait.Seconds -eq 180 -and $wait.Pipelines.Count -eq 15) 'The initial three-minute budget includes time spent in the first connection attempt'
+Assert-True ($wait.Failed -and $wait.Seconds -eq 300 -and $wait.Pipelines.Count -eq 27) 'The configured budget includes time spent in the first connection attempt'
 $wait=Invoke-TestDirectWait -Failures @($protocol) -InitialBoot -RepeatFailure -TimeoutSeconds 25
-Assert-True ($wait.Failed -and $wait.Seconds -eq 25) 'The total timeout takes priority over the protocol retry window'
+Assert-True ($wait.Failed -and $wait.Seconds -eq 25) 'An explicitly short timeout is respected'
 $wait=Invoke-TestDirectWait -Failures @($protocol) -InitialBoot -TimeoutAttempt 2
-Assert-True ($wait.Failed -and $wait.Seconds -eq 180 -and $wait.WaitMilliseconds[1] -eq 170000 -and $wait.Pipelines[1].Stopped) 'An in-flight retry cannot exceed the three-minute deadline'
+Assert-True ($wait.Failed -and $wait.Seconds -eq 300 -and $wait.WaitMilliseconds[1] -eq 290000 -and $wait.Pipelines[1].Stopped) 'An in-flight retry receives the remaining configured deadline'
 $transport=New-SyntheticTransportRecord 'A remote session might have ended.'
 $wait=Invoke-TestDirectWait -Failures @($transport)
 Assert-True ($wait.Succeeded -and $wait.Seconds -eq 10) 'Existing transport retries remain available without InitialBoot'
 $wait=Invoke-TestDirectWait -Failures @($transport) -RepeatFailure -TimeoutSeconds 240
-Assert-True ($wait.Failed -and $wait.Seconds -eq 240) 'Normal connection waits retain their configured timeout beyond three minutes'
-$mixedFailures=@($protocol)+@(1..18 | ForEach-Object { $transport })
+Assert-True ($wait.Failed -and $wait.Seconds -eq 240) 'Normal connection waits retain their configured timeout'
+$mixedFailures=@($protocol)+@(1..35 | ForEach-Object { $transport })
 $wait=Invoke-TestDirectWait -Failures $mixedFailures -InitialBoot
-Assert-True ($wait.Failed -and $wait.Seconds -eq 180 -and $wait.Pipelines.Count -eq 18) 'Transport failures cannot reset the initial protocol deadline'
+Assert-True ($wait.Failed -and $wait.Seconds -eq 300 -and $wait.Pipelines.Count -eq 30) 'Transport failures cannot reset the configured deadline'
 $wait=Invoke-TestDirectWait -InitialBoot -TimeoutAttempt 1
-Assert-True ($wait.Failed -and $wait.Seconds -eq 180 -and $wait.WaitMilliseconds[0] -eq 180000) 'A hanging first initial-boot attempt is bounded by three minutes'
+Assert-True ($wait.Failed -and $wait.Seconds -eq 300 -and $wait.WaitMilliseconds[0] -eq 300000) 'A hanging first initial-boot attempt uses the configured deadline'
 $wait=Invoke-TestDirectWait -TimeoutAttempt 1 -TimeoutSeconds 25
 Assert-True ($wait.Failed -and $wait.Seconds -eq 25 -and $wait.Pipelines[0].Stopped -and $wait.Pipelines[0].Disposed) 'An in-flight initial attempt is stopped and disposed at the total deadline'
 $wait=Invoke-TestDirectWait -LogFailure
