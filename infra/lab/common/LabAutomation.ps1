@@ -256,7 +256,7 @@ function Assert-LabRoleResult {
         'StageSource' { @() }
         'InitializeDns' { @('DnsReady') }
         'PrepareHyperV' { @('HyperVReady') }
-        'BuildNested' { @('L2Ready', 'HandoverReady', 'ImdsBlocked', 'Licensed') }
+        { $_ -in @('BuildNested','CompleteNested') } { @('L2Ready', 'HandoverReady', 'ImdsBlocked', 'Licensed') }
         'VerifyBuild' { @('DnsReady', 'RdpReady') }
         'VerifyRestricted' { @('InternetBlocked', 'DnsReady', 'RdpReady') }
         default { throw 'Unknown guest action.' }
@@ -279,7 +279,7 @@ function Invoke-LabRoleAction {
     if ($Download) {
         $protected.ArchiveUri = Get-LabArchiveUri -Repository $Context.Repository -CommitSha $Context.Source.CommitSha -Token $Context.GitHubToken
     }
-    if ($Role -eq 'hyperv' -and $Action -in 'BuildNested', 'VerifyBuild', 'VerifyRestricted') {
+    if ($Role -eq 'hyperv' -and $Action -in 'BuildNested', 'CompleteNested', 'VerifyBuild', 'VerifyRestricted') {
         $protected.L2Password = [Net.NetworkCredential]::new('', $Context.L2Password).Password
     }
     try {
@@ -345,8 +345,9 @@ function Assert-LabRecoveryContext {
     $approval = Get-Content -LiteralPath (Join-Path $Recovery.PreviousRunDirectory 'approval.json') -Raw |
         ConvertFrom-Json -AsHashtable
     $resumeFrom = if ($Recovery.ContainsKey('ResumeFrom')) { $Recovery.ResumeFrom } else { 'DeployResources' }
-    if ($resumeFrom -notin 'DeployResources','InitializeDns','BuildNested') { throw 'The requested recovery stage is not supported.' }
-    if ($previous['Stage'] -ne $resumeFrom -or $previous['Status'] -ne 'Failed' -or
+    if ($resumeFrom -notin 'DeployResources','InitializeDns','BuildNested','CompleteNested') { throw 'The requested recovery stage is not supported.' }
+    $previousStage = if ($resumeFrom -eq 'CompleteNested') { 'BuildNested' } else { $resumeFrom }
+    if ($previous['Stage'] -ne $previousStage -or $previous['Status'] -ne 'Failed' -or
         $previous['RunId'] -notmatch '^[a-f0-9]{32}$' -or $previous.RunId -eq $Context.RunId -or
         $approval['RunId'] -ne $previous.RunId -or $approval['SourceCommit'] -ne $previous['CommitSha'] -or
         $previous['CommitSha'] -notmatch '^[a-f0-9]{40}$') {
@@ -368,9 +369,10 @@ function Assert-LabRecoveryContext {
             throw 'An approved recovery resource ID is outside the target resource group.'
         }
     }
-    if ($resumeFrom -in 'InitializeDns','BuildNested') {
+    if ($resumeFrom -in 'InitializeDns','BuildNested','CompleteNested') {
         $expectedRole = if ($resumeFrom -eq 'InitializeDns') { 'dns' } else { 'hyperv' }
-        $commandPattern = '^lab-' + $previous.RunId.Substring(0, 8) + '-' + $resumeFrom.ToLowerInvariant() + '-[a-f0-9]{6}$'
+        $actionPattern = if ($resumeFrom -eq 'CompleteNested') { '(?:buildnested|completenested)' } else { $resumeFrom.ToLowerInvariant() }
+        $commandPattern = '^lab-' + $previous.RunId.Substring(0, 8) + '-' + $actionPattern + '-[a-f0-9]{6}$'
         if ($previous['Detail'] -isnot [Collections.IDictionary] -or
             $previous.Detail['CurrentRole'] -ne $expectedRole -or $previous.Detail['LastRunCommand'] -notmatch $commandPattern) {
             throw "Guest recovery requires the matching failed $expectedRole role and Run Command record."
@@ -386,8 +388,8 @@ function Invoke-LabAutomation {
     param([hashtable]$Context, [hashtable]$Recovery)
     $recovering = $PSBoundParameters.ContainsKey('Recovery') -and $null -ne $Recovery
     if ($recovering) { Assert-LabRecoveryContext -Context $Context -Recovery $Recovery }
-    $guestOnly = $recovering -and ($Recovery['ResumeFrom'] -in 'InitializeDns','BuildNested')
-    $nestedOnly = $recovering -and $Recovery['ResumeFrom'] -eq 'BuildNested'
+    $guestOnly = $recovering -and ($Recovery['ResumeFrom'] -in 'InitializeDns','BuildNested','CompleteNested')
+    $nestedOnly = $recovering -and ($Recovery['ResumeFrom'] -in 'BuildNested','CompleteNested')
     $stage = 'ValidateInputs'
     try {
         Save-LabRunState $Context $stage 'Running'
@@ -489,7 +491,8 @@ function Invoke-LabAutomation {
         }
         $stage = 'BuildNested'
         Save-LabRunState $Context $stage 'Running'
-        $null = Invoke-LabRoleAction -Context $Context -Role hyperv -Action BuildNested
+        $nestedAction = if ($recovering -and $Recovery['ResumeFrom'] -eq 'CompleteNested') { 'CompleteNested' } else { 'BuildNested' }
+        $null = Invoke-LabRoleAction -Context $Context -Role hyperv -Action $nestedAction
         $stage = 'VerifyBuild'
         Save-LabRunState $Context $stage 'Running'
         foreach ($role in 'dns', 'workload', 'hyperv') {

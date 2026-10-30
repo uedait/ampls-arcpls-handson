@@ -57,7 +57,7 @@ foreach ($role in @('dns','hyperv','workload')) {
     }
 }
 Assert-True (-not (Test-LabSourceCacheOnly StageSource)) 'Only StageSource may acquire the archive'
-foreach ($action in @('InitializeDns','PrepareHyperV','BuildNested','VerifyBuild','VerifyRestricted')) {
+foreach ($action in @('InitializeDns','PrepareHyperV','BuildNested','CompleteNested','VerifyBuild','VerifyRestricted')) {
     Assert-True (Test-LabSourceCacheOnly $action) 'Role actions require an owned cache, never a download fallback'
 }
 Assert-True ((Get-LabDownloadRemainingMilliseconds 0) -eq 600000) 'Source download budget is 600 seconds'
@@ -139,8 +139,10 @@ foreach ($guard in @($effectiveGuard,$roleGuard)) {
 Assert-LabRequest InitializeDns dns $commit $repo ([guid]::NewGuid().ToString())
 Assert-LabRequest PrepareHyperV hyperv $commit $repo $run
 Assert-LabRequest BuildNested hyperv $commit $repo $run
+Assert-LabRequest CompleteNested hyperv $commit $repo $run
 foreach ($pair in @(@('InitializeDns','hyperv'), @('InitializeDns','workload'),
-    @('PrepareHyperV','dns'), @('BuildNested','workload'), @('BuildNested','dns'), @('Other','hyperv'))) {
+    @('PrepareHyperV','dns'), @('BuildNested','workload'), @('BuildNested','dns'),
+    @('CompleteNested','dns'), @('CompleteNested','workload'), @('Other','hyperv'))) {
     Assert-Throws { Assert-LabRequest $pair[0] $pair[1] $commit $repo $run } 'Reject role/action conflict'
 }
 Assert-Throws { Assert-LabRequest VerifyBuild dns 'bad' $repo $run } 'Commit must be full SHA'
@@ -284,6 +286,9 @@ Assert-Throws {
 Assert-Throws {
     ConvertTo-LabResult $run hyperv BuildNested $commit $false @{ L2Ready = $true; HandoverReady = $true; ImdsBlocked = $true }
 } 'License cannot be omitted'
+Assert-Throws {
+    ConvertTo-LabResult $run hyperv CompleteNested $commit $false @{ L2Ready=$true; HandoverReady=$true; ImdsBlocked=$true }
+} 'Existing VM completion cannot omit license validation'
 Assert-Throws {
     ConvertTo-LabResult $run workload VerifyBuild $commit $false @{ DnsReady = $true; RdpReady = $true; ArchiveUri = $true }
 } 'Reject unapproved result keys'

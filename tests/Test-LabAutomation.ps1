@@ -50,6 +50,10 @@ try {
     $instance = @{output='LAB_RESULT:' + ($valid | ConvertTo-Json -Compress)}
     $result = Assert-LabRoleResult $context hyperv VerifyBuild $instance
     Assert-Test ($result.Licensed -eq $true) 'Valid structured readiness result.'
+    $completeResult = $valid.Clone()
+    $completeResult.Action = 'CompleteNested'
+    $completeResult.Licensed = $false
+    Assert-Throws { Assert-LabRoleResult $context hyperv CompleteNested @{output='LAB_RESULT:' + ($completeResult | ConvertTo-Json -Compress)} } 'Licensed'
     foreach ($key in 'RunId', 'CommitSha', 'Role', 'FilesReady', 'Licensed', 'HandoverReady') {
         $changed = $valid.Clone()
         $changed[$key] = if ($changed[$key] -is [bool]) { $false } else { 'wrong' }
@@ -358,6 +362,21 @@ try {
     $missingNestedVm = $nestedRecovery.Clone()
     $missingNestedVm.ApprovedResourceIds = @($approvedId) + $vmIds[0,1]
     Assert-Throws { Invoke-LabAutomation -Context $context -Recovery $missingNestedVm } 'all three approved lab VM IDs'
+    $completionRecovery = $nestedRecovery.Clone()
+    $completionRecovery.ResumeFrom = 'CompleteNested'
+    $script:events.Clear()
+    $result = Invoke-LabAutomation -Context $context -Recovery $completionRecovery
+    Assert-Test ($result.Status -eq 'Succeeded' -and $script:events.Contains('hyperv/CompleteNested') -and
+        $script:events.Contains('RestrictionApplied')) 'Explicit completion continues an existing L2 through final verification.'
+    Assert-Test (-not $script:events.Contains('hyperv/BuildNested') -and
+        -not $script:events.Contains('ResourceDeploymentRequested') -and
+        -not $script:events.Contains('dns/InitializeDns') -and
+        -not $script:events.Contains('hyperv/PrepareHyperV')) 'Existing L2 completion never falls back to fresh creation or completed foundation stages.'
+    $priorCompletion = $nestedRecord.Clone()
+    $priorCompletion.Detail = @{CurrentRole='hyperv'; LastRunCommand='lab-dddddddd-completenested-123abc'}
+    $priorCompletion | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $previousStatePath
+    $result = Invoke-LabAutomation -Context $context -Recovery $completionRecovery
+    Assert-Test ($result.Status -eq 'Succeeded') 'A recorded failed completion can retry only through the explicit completion mode.'
     $previousRecord | ConvertTo-Json | Set-Content -LiteralPath $previousStatePath
     $script:groupExists = $false
     $script:existingResources = @()
@@ -385,6 +404,10 @@ try {
         $result = Invoke-LabAutomation -Context $context -Recovery $nestedRecovery
         Assert-Test ($result.Status -eq 'Succeeded' -and -not $script:events.Contains('ResourceDeploymentRequested') -and
             -not $script:events.Contains('dns/InitializeDns')) 'Service principal nested recovery retains the identity guard without repeating completed deployment.'
+        $script:events.Clear()
+        $result = Invoke-LabAutomation -Context $context -Recovery $completionRecovery
+        Assert-Test ($result.Status -eq 'Succeeded' -and $script:events.Contains('hyperv/CompleteNested') -and
+            -not $script:events.Contains('hyperv/BuildNested')) 'Service principal completion selects the existing-VM action only.'
         $previousRecord | ConvertTo-Json | Set-Content -LiteralPath $previousStatePath
         $script:groupExists = $false
         $script:existingResources = @()

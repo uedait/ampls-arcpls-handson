@@ -138,6 +138,31 @@ function Get-NestedVmBiosGuid {
     return $biosGuid
 }
 
+function Assert-NestedContinuationLayout {
+    param(
+        [object]$Vm, [object]$State, [object[]]$Drives, [object[]]$Adapters, [object]$Disk,
+        [guid]$BiosGuid, [string]$VmName, [string]$ChildPath
+    )
+    $recordVmId=[guid]::Empty
+    $recordBios=[guid]::Empty
+    if ($State.Status -ne 'Failed' -or $State.FailureStage -ne 'PowerShellDirectReadiness' -or
+        $State.VmName -ne $VmName -or $State.ChildPath -ne $ChildPath -or
+        -not [guid]::TryParse([string]$State.VmId,[ref]$recordVmId) -or $recordVmId -eq [guid]::Empty -or
+        -not [guid]::TryParse([string]$State.BiosGuid,[ref]$recordBios) -or $recordBios -eq [guid]::Empty) {
+        throw 'Existing nested VM continuation requires the matching failed connection-readiness record.'
+    }
+    if ($Vm.Name -ne $VmName -or $Vm.Id -ne $recordVmId -or $Vm.Generation -ne 2 -or
+        $Vm.State -notin @('Off','Running') -or $BiosGuid -eq [guid]::Empty -or $BiosGuid -ne $recordBios) {
+        throw 'Existing nested VM identity does not match the recorded VM and BIOS GUID.'
+    }
+    if ($Drives.Count -ne 1 -or $Drives[0].Path -ne $ChildPath -or
+        $Adapters.Count -ne 1 -or $Adapters[0].SwitchName -ne 'OptionalLab-Internal' -or
+        $Disk.Path -ne $ChildPath -or $Disk.VhdType -ne 'Differencing' -or $Disk.ParentPath -ne $State.ParentPath -or
+        ($Vm.State -eq 'Off' -and $Disk.Attached)) {
+        throw 'Existing nested VM disks or internal switch do not match the recorded layout.'
+    }
+}
+
 function New-NestedUnattendXml {
     param(
         [Parameter(Mandatory)][string]$ComputerName,
@@ -278,11 +303,17 @@ function Wait-NestedDirect {
                 throw 'PowerShell Direct readiness timed out; inspect the retained VM.'
             }
             $result = $null
+            $failure = $null
             try { $result = $pipeline.EndInvoke($async) }
             catch {
-                if ($pipeline.Streams.Error.Count -eq 0) { throw }
+                if ($pipeline.Streams.Error.Count -eq 0) {
+                    $reason = $pipeline.InvocationStateInfo.Reason
+                    if ($reason -is [Management.Automation.RuntimeException]) { $failure = $reason.ErrorRecord }
+                    if (-not $failure) { throw }
+                }
             }
-            if ($pipeline.Streams.Error.Count -eq 0) {
+            if ($pipeline.Streams.Error.Count -gt 0) { $failure = $pipeline.Streams.Error[0] }
+            if (-not $failure) {
                 if (@($result).Count -ne 1 -or $result[0].State -ne 'Opened') {
                     throw 'PowerShell Direct returned no open session.'
                 }
@@ -291,7 +322,6 @@ function Wait-NestedDirect {
                 $keepPipeline = $true
                 return [pscustomobject]@{ Session = $result[0]; Pipeline = $pipeline }
             }
-            $failure = $pipeline.Streams.Error[0]
             # Microsoft documents this specific English transport error as a boot/
             # service readiness failure. Other locales fail closed, not guessed.
             if (-not (Test-NestedBootTransportError $failure)) {

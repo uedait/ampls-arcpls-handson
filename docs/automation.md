@@ -69,7 +69,7 @@ Azure の管理者パスワードは secure パラメーターとして ARM の�
 
 - `PreviousRunDirectory`: 元の `state.json` と `approval.json` がある実行ディレクトリの絶対パス。
 - `ApprovedResourceIds`: 再利用を承認した既存リソースの完全な ID の配列。
-- `ResumeFrom`: `DeployResources`、`InitializeDns`、`BuildNested` のいずれか。省略した場合は `DeployResources`。
+- `ResumeFrom`: `DeployResources`、`InitializeDns`、`BuildNested`、`CompleteNested` のいずれか。省略した場合は `DeployResources`。
 
 元の実行は指定した `ResumeFrom` で `Failed` になっている必要があります。元の実行記録と承認記録の Run ID、コミット、対象 RG、テナント、サブスクリプション、接頭辞、リージョン、取得元を照合します。新しい実行 ID を使い、元の実行記録と保存済み資格情報を上書きしません。復旧用スクリプトは、同じ Windows ユーザーと端末で元の資格情報を復号して同じ値を使用します。復号や再保存の照合に失敗した場合は変更前に停止し、別の資格情報へ自動的に切り替えません。
 
@@ -82,6 +82,14 @@ Azure の管理者パスワードは secure パラメーターとして ARM の�
 `BuildNested` の復旧では、元の対象が Hyper-V ホストで、最後の Run Command が元の Run ID の L2 構築処理であることを要求します。3台の VM を含む承認済み ID を照合し、修正コミットのソースを3台へ再配置します。VM とネットワークのデプロイ、DNS、Hyper-V の構成は繰り返さず、L2 の構築と、その後の確認・送信制限を実行します。親ディスクの Ready 記録とハッシュが一致する場合は、完成済みキャッシュを再利用します。既存 L2 の VM またはディレクトリがある場合は上書きせず停止します。
 
 DNS 転送先の未設定は、初回構成時には正常な状態として扱います。設定後の確認では、転送先が `168.63.129.16` の1件だけであることを要求します。
+
+`CompleteNested` は、L2 の作成後に PowerShell Direct 接続待ちで停止した場合の完了処理です。元の制御記録は BuildNested / Failed、対象は Hyper-V ホストで、最後の Run Command は元の Run ID の BuildNested または CompleteNested であることを要求します。作成済み L2 の VM ID、BIOS GUID、Generation 2、接続ディスクと親参照、内部スイッチが作成記録と一致する場合だけ設定を続行します。不一致の場合に新規作成へ切り替えることはありません。
+
+この経路では VM、親・子ディスク、応答ファイル、NAT を再作成せず、ディスクをマウント解除しません。元の状態記録を保存し、必要な場合だけ同じ L2 を起動します。接続後の UUID 確認から、既知の応答ファイルの後片付け、ゲスト設定、ハンドオーバー、正規の評価版認証と確認を実行します。
+
+ゲスト側では `New-NestedLabFromIso.ps1 -UseDefaultMedia -ContinueExistingVm` の専用モードを使います。このモードで `UseDefaultMedia` を指定しても、ISO の取得やディスク作成は行いません。`ContinueExistingVm` を指定しない通常の実行は、既存 VM とゲストディレクトリを引き続き拒否します。
+
+PowerShell SDK の停止例外は、エラーストリームに加えて `InvocationStateInfo.Reason.ErrorRecord` も確認します。Microsoft が示す既知の英語の起動待ち transport エラーだけを期限内で再試行し、認証・権限・未知のエラーを再試行対象へ広げません。
 
 上記以外の段階からの再開、自動的な対象追加、自動削除はこの復旧経路に含めません。
 

@@ -5,6 +5,7 @@ param(
     [Parameter(Mandatory, ParameterSetName = 'Local')][string]$IsoPath,
     [Parameter(Mandatory, ParameterSetName = 'Download')][Alias('IsoUri')][uri]$DownloadUri,
     [Parameter(Mandatory, ParameterSetName = 'Default')][switch]$UseDefaultMedia,
+    [switch]$ContinueExistingVm,
     [Parameter(Mandatory, ParameterSetName = 'Local')]
     [Parameter(Mandatory, ParameterSetName = 'Download')]
     [Alias('ExpectedSha256')][ValidatePattern('^[A-Fa-f0-9]{64}$')][string]$Sha256,
@@ -40,8 +41,12 @@ if ($root.Equals($cache, [StringComparison]::OrdinalIgnoreCase) -or
 $guestDirectory = Join-Path $root $VmName
 $childPath = Join-Path $guestDirectory "$VmName.vhdx"
 $statePath = Join-Path $guestDirectory 'deployment.json'
-if ((Get-VM -Name $VmName -ErrorAction SilentlyContinue) -or
-    (Test-Path -LiteralPath $guestDirectory)) {
+$existingVm = Get-VM -Name $VmName -ErrorAction SilentlyContinue
+if ($ContinueExistingVm) {
+    if (-not $existingVm -or -not (Test-Path -LiteralPath $guestDirectory)) {
+        throw 'Existing VM continuation requires the recorded VM and guest directory. No new resources will be created.'
+    }
+} elseif ($existingVm -or (Test-Path -LiteralPath $guestDirectory)) {
     throw "VM or guest directory already exists. Inspect $statePath manually. No resume, overwrite, or automatic deletion is supported."
 }
 if (Test-Path -LiteralPath $root) {
@@ -54,8 +59,9 @@ if (Test-Path -LiteralPath $root) {
     }
 }
 else {
+    if ($ContinueExistingVm) { throw 'Existing VM continuation requires the owned guest root.' }
     [void](New-Item -ItemType Directory -Path $root)
-    Protect-NestedDirectory $root
+    if (-not $ContinueExistingVm) { Protect-NestedDirectory $root }
     [IO.File]::WriteAllText((Join-Path $root 'nested-guests.marker'), 'NestedIsoGuests-v1')
 }
 Protect-NestedDirectory $root
@@ -63,7 +69,11 @@ if (-not $Credential) {
     $Credential = Get-Credential -UserName 'Administrator' -Message 'L2 built-in Administrator password; never enter it on a command line'
 }
 if (-not $credential) { throw 'Credential input was cancelled.' }
-$answer = New-NestedUnattendXml -ComputerName $VmName -TimeZone $TimeZone -Credential $credential
+if ($credential.UserName -cne 'Administrator') { throw 'The L2 credential username must be exactly Administrator.' }
+$answer = $null
+if (-not $ContinueExistingVm) {
+    $answer = New-NestedUnattendXml -ComputerName $VmName -TimeZone $TimeZone -Credential $credential
+}
 $parentArgs = @{ CacheDirectory = $CacheDirectory; DiskSizeGB = $DiskSizeGB }
 if ($UseDefaultMedia) { $parentArgs.UseDefaultMedia = $true }
 else {
@@ -78,56 +88,96 @@ $session = $null
 $direct = $null
 $mounted = $false
 $state = $null
-$stage = 'ParentBuild'
+$stage = if ($ContinueExistingVm) { 'ContinuationValidation' } else { 'ParentBuild' }
 try {
-    $parentPath = & (Join-Path $PSScriptRoot 'New-NestedParentDisk.ps1') @parentArgs
-    if ($parentPath -isnot [string] -or -not $parentPath.EndsWith('.vhdx')) {
-        throw 'Parent builder did not return exactly one VHDX path.'
+    if ($ContinueExistingVm) {
+        foreach ($path in @($guestDirectory,$childPath,$statePath)) { [void](Assert-NestedLocalPath $path) }
+        $savedState = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+        $knownKeys = @('Status','VmName','ParentPath','ChildPath','SecretMayRemain','AnswerFilesRemoved',
+            'ActivationChecked','InternetDenyReady','FailureStage','FailureKind','VmId','BiosGuid')
+        if (@($savedState.PSObject.Properties | Where-Object { $_.Name -notin $knownKeys }).Count -gt 0) {
+            throw 'Unexpected fields in the existing VM creation record.'
+        }
+        $vm = $existingVm
+        $biosGuid = Get-NestedVmBiosGuid -VmId $vm.Id
+        $drives = @(Get-VMHardDiskDrive -VMName $VmName)
+        $adapters = @(Get-VMNetworkAdapter -VMName $VmName)
+        $disk = Get-VHD -Path $childPath
+        Assert-NestedContinuationLayout -Vm $vm -State $savedState -Drives $drives -Adapters $adapters `
+            -Disk $disk -BiosGuid $biosGuid -VmName $VmName -ChildPath $childPath
+        $parentPath = Assert-NestedLocalPath $savedState.ParentPath
+        if ([IO.Path]::GetDirectoryName($parentPath) -ne $cache -or -not (Get-Item -LiteralPath $parentPath).IsReadOnly) {
+            throw 'Existing VM continuation requires the recorded read-only parent cache.'
+        }
+        $parentRecord = [IO.Path]::ChangeExtension($parentPath, '.json')
+        [void](Assert-NestedLocalPath $parentRecord)
+        $parentState = Get-Content -LiteralPath $parentRecord -Raw | ConvertFrom-Json
+        if ($parentState.Status -ne 'Ready' -or $parentState.ParentPath -ne $parentPath) {
+            throw 'Existing VM continuation requires the matching Ready parent record.'
+        }
+        $backup = Join-Path $root ($VmName + '.before-completion-' + [guid]::NewGuid().ToString('N') + '.json')
+        [void](Assert-NestedLocalPath $backup)
+        if (Test-Path -LiteralPath $backup) { throw 'Existing VM continuation backup already exists.' }
+        Copy-Item -LiteralPath $statePath -Destination $backup -ErrorAction Stop
+        if ((Get-FileHash -LiteralPath $statePath -Algorithm SHA256).Hash -ne
+            (Get-FileHash -LiteralPath $backup -Algorithm SHA256).Hash) { throw 'Existing VM state backup mismatch.' }
+        $state = [ordered]@{}
+        foreach ($property in $savedState.PSObject.Properties) { $state[$property.Name] = $property.Value }
+        $state.Status = 'Booting'
+        $state.FailureStage = $null
+        $state.FailureKind = $null
+        Save-NestedManifest $statePath $state
+        if ($vm.State -eq 'Off') { Start-VM -Name $VmName | Out-Null }
+    } else {
+        $parentPath = & (Join-Path $PSScriptRoot 'New-NestedParentDisk.ps1') @parentArgs
+        if ($parentPath -isnot [string] -or -not $parentPath.EndsWith('.vhdx')) {
+            throw 'Parent builder did not return exactly one VHDX path.'
+        }
+        [void](New-Item -ItemType Directory -Path $guestDirectory -ErrorAction Stop)
+        Protect-NestedDirectory $guestDirectory
+        $state = [ordered]@{
+            Status = 'Preparing'; VmName = $VmName; ParentPath = $parentPath
+            ChildPath = $childPath; SecretMayRemain = $true; AnswerFilesRemoved = $false
+            ActivationChecked = $false; InternetDenyReady = $false
+            FailureStage = $null; FailureKind = $null
+        }
+        Save-NestedManifest $statePath $state
+        $stage = 'ChildPreparation'
+        [void](New-VHD -Path $childPath -ParentPath $parentPath -Differencing)
+        $childMount = Mount-VHD -Path $childPath -Passthru
+        $mounted = $true
+        $disk = $childMount | Get-Disk
+        $partitions = @($disk | Get-Partition | Where-Object {
+            $_.GptType -eq '{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}'
+        })
+        if ($partitions.Count -ne 1) { throw 'Expected one Windows basic data partition in the child.' }
+        if (-not $partitions[0].DriveLetter) {
+            $partitions[0] | Add-PartitionAccessPath -AssignDriveLetter
+        }
+        $partition = Get-Partition -DiskNumber $disk.Number -PartitionNumber $partitions[0].PartitionNumber
+        $windows = "$($partition.DriveLetter):\Windows"
+        if (-not (Test-Path -LiteralPath "$windows\System32\Config\SYSTEM")) { throw 'Child Windows partition was not found.' }
+        [void](New-Item -ItemType Directory -Path "$windows\Panther" -Force)
+        $answer.Save("$windows\Panther\unattend.xml")
+        $answer = $null
+        Dismount-VHD -Path $childPath
+        $mounted = $false
+        $stage = 'NetworkInitialization'
+        & (Join-Path $PSScriptRoot 'Initialize-NestedNetwork.ps1')
+        $stage = 'VmCreation'
+        $vm = New-VM -Name $VmName -Generation 2 -MemoryStartupBytes 4GB `
+            -VHDPath $childPath -SwitchName 'OptionalLab-Internal' -Path $guestDirectory
+        Set-VMProcessor -VMName $VmName -Count 2
+        Set-VMMemory -VMName $VmName -DynamicMemoryEnabled $false
+        Set-VM -VMName $VmName -AutomaticStartAction Nothing -AutomaticStopAction ShutDown
+        Set-VMFirmware -VMName $VmName -EnableSecureBoot On -SecureBootTemplate MicrosoftWindows
+        $biosGuid = Get-NestedVmBiosGuid -VmId $vm.Id
+        $state['VmId'] = "$($vm.Id)"
+        $state['BiosGuid'] = "$biosGuid"
+        $state.Status = 'Booting'
+        Save-NestedManifest $statePath $state
+        Start-VM -Name $VmName | Out-Null
     }
-    [void](New-Item -ItemType Directory -Path $guestDirectory -ErrorAction Stop)
-    Protect-NestedDirectory $guestDirectory
-    $state = [ordered]@{
-        Status = 'Preparing'; VmName = $VmName; ParentPath = $parentPath
-        ChildPath = $childPath; SecretMayRemain = $true; AnswerFilesRemoved = $false
-        ActivationChecked = $false; InternetDenyReady = $false
-        FailureStage = $null; FailureKind = $null
-    }
-    Save-NestedManifest $statePath $state
-    $stage = 'ChildPreparation'
-    [void](New-VHD -Path $childPath -ParentPath $parentPath -Differencing)
-    $childMount = Mount-VHD -Path $childPath -Passthru
-    $mounted = $true
-    $disk = $childMount | Get-Disk
-    $partitions = @($disk | Get-Partition | Where-Object {
-        $_.GptType -eq '{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}'
-    })
-    if ($partitions.Count -ne 1) { throw 'Expected one Windows basic data partition in the child.' }
-    if (-not $partitions[0].DriveLetter) {
-        $partitions[0] | Add-PartitionAccessPath -AssignDriveLetter
-    }
-    $partition = Get-Partition -DiskNumber $disk.Number -PartitionNumber $partitions[0].PartitionNumber
-    $windows = "$($partition.DriveLetter):\Windows"
-    if (-not (Test-Path -LiteralPath "$windows\System32\Config\SYSTEM")) { throw 'Child Windows partition was not found.' }
-    [void](New-Item -ItemType Directory -Path "$windows\Panther" -Force)
-    $answer.Save("$windows\Panther\unattend.xml")
-    $answer = $null
-    Dismount-VHD -Path $childPath
-    $mounted = $false
-    $stage = 'NetworkInitialization'
-    & (Join-Path $PSScriptRoot 'Initialize-NestedNetwork.ps1')
-    $stage = 'VmCreation'
-    $vm = New-VM -Name $VmName -Generation 2 -MemoryStartupBytes 4GB `
-        -VHDPath $childPath -SwitchName 'OptionalLab-Internal' -Path $guestDirectory
-    Set-VMProcessor -VMName $VmName -Count 2
-    Set-VMMemory -VMName $VmName -DynamicMemoryEnabled $false
-    Set-VM -VMName $VmName -AutomaticStartAction Nothing -AutomaticStopAction ShutDown
-    Set-VMFirmware -VMName $VmName -EnableSecureBoot On -SecureBootTemplate MicrosoftWindows
-    $biosGuid = Get-NestedVmBiosGuid -VmId $vm.Id
-    $state['VmId'] = "$($vm.Id)"
-    $state['BiosGuid'] = "$biosGuid"
-    $state.Status = 'Booting'
-    Save-NestedManifest $statePath $state
-    Start-VM -Name $VmName | Out-Null
     $stage = 'PowerShellDirectReadiness'
     $direct = Wait-NestedDirect -VmName $VmName -Credential $credential -TimeoutSeconds $ReadinessTimeoutSeconds
     $session = $direct.Session
@@ -204,8 +254,8 @@ try {
         -ArgumentList "$biosGuid", $hashes, $false -ErrorAction Stop
     if (-not $readiness.NestedReady) { throw 'L2 readiness failed.' }
     $state.BiosGuid = "$biosGuid"
-    $state.HandoverHashes = $hashes
-    $state.UpdatesBaseline = 'StandardImageOnly'
+    $state['HandoverHashes'] = $hashes
+    $state['UpdatesBaseline'] = 'StandardImageOnly'
     $stage = 'SessionCleanup'
     Remove-PSSession -Session $session -ErrorAction Stop
     $session = $null

@@ -3,7 +3,7 @@
 # Dot-sourcing defines functions only, for offline synthetic tests.
 [CmdletBinding()]
 param(
-    [ValidateSet('StageSource','InitializeDns','PrepareHyperV','BuildNested','VerifyBuild','VerifyRestricted')][string]$Action,
+    [ValidateSet('StageSource','InitializeDns','PrepareHyperV','BuildNested','CompleteNested','VerifyBuild','VerifyRestricted')][string]$Action,
     [ValidateSet('dns','hyperv','workload')][string]$Role,
     [string]$CommitSha,
     [string]$Repository = 'uedait/ampls-arcpls-handson',
@@ -22,7 +22,7 @@ function Assert-LabRequest {
     }
     $actions = @{
         dns = @('StageSource','InitializeDns','VerifyBuild','VerifyRestricted')
-        hyperv = @('StageSource','PrepareHyperV','BuildNested','VerifyBuild','VerifyRestricted')
+        hyperv = @('StageSource','PrepareHyperV','BuildNested','CompleteNested','VerifyBuild','VerifyRestricted')
         workload = @('StageSource','VerifyBuild','VerifyRestricted')
     }
     if (-not $actions.ContainsKey($Role) -or $actions[$Role] -notcontains $Action) {
@@ -501,7 +501,7 @@ function ConvertTo-LabResult {
             'StageSource' { @('SourceVerified') }
             'InitializeDns' { @('DnsReady') }
             'PrepareHyperV' { @('HyperVReady') }
-            'BuildNested' { @('L2Ready','HandoverReady','ImdsBlocked','Licensed') }
+            { $_ -in @('BuildNested','CompleteNested') } { @('L2Ready','HandoverReady','ImdsBlocked','Licensed') }
             'VerifyBuild' {
                 @('DnsReady','RdpReady')
                 if ($Role -eq 'hyperv') { @('L2Ready','HandoverReady','ImdsBlocked','Licensed') }
@@ -558,7 +558,7 @@ try {
     Protect-LabDirectory $package
     $guest = Join-Path $package 'infra\lab\guest'
     if ($Action -ne 'StageSource') { . (Join-Path $guest 'NestedIso.Helpers.ps1') }
-    if ($Role -eq 'hyperv' -and $Action -in @('BuildNested','VerifyBuild','VerifyRestricted')) {
+    if ($Role -eq 'hyperv' -and $Action -in @('BuildNested','CompleteNested','VerifyBuild','VerifyRestricted')) {
         if (-not $L2Password) { throw 'Protected L2 credential is required.' }
         $secure = ConvertTo-SecureString $L2Password -AsPlainText -Force
         $credential = [pscredential]::new('Administrator', $secure)
@@ -597,9 +597,11 @@ try {
                 $checks.RoleReady = $true
             }
         }
-        'BuildNested' {
+        { $_ -in @('BuildNested','CompleteNested') } {
             Assert-LabDns $Role
-            & (Join-Path $guest 'New-NestedLabFromIso.ps1') -UseDefaultMedia -Credential $credential `
+            $nestedArguments = @{UseDefaultMedia=$true; Credential=$credential}
+            if ($Action -eq 'CompleteNested') { $nestedArguments.ContinueExistingVm=$true }
+            & (Join-Path $guest 'New-NestedLabFromIso.ps1') @nestedArguments `
                 -InformationAction SilentlyContinue -WarningAction SilentlyContinue | Out-Null
             $nested = Get-LabNestedChecks $package $credential $false
             foreach ($key in @('NestedReady','IdentityReady','NetworkReady','ImdsBlocked','HandoverFilesReady','Licensed')) {

@@ -111,6 +111,95 @@ foreach ($mode in @('missing','multiple','wrong-vm','snapshot','bad-guid','empty
     Assert-Throws { Invoke-TestBiosLookup $mode } 'Reject missing, ambiguous or mismatched BIOS identity without fallback'
 }
 Assert-Throws { Get-NestedVmBiosGuid -VmId ([guid]::Empty) } 'Reject an empty VM ID before CIM lookup'
+function New-TestContinuationLayout {
+    @{
+        Vm=[pscustomobject]@{Name='Test-L2'; Id=[guid]'11111111-1111-1111-1111-111111111111'; Generation=2; State='Running'}
+        State=[pscustomobject]@{
+            Status='Failed'; FailureStage='PowerShellDirectReadiness'; VmName='Test-L2'
+            VmId='11111111-1111-1111-1111-111111111111'; BiosGuid='22222222-2222-2222-2222-222222222222'
+            ChildPath='C:\Synthetic\Test-L2.vhdx'; ParentPath='C:\SyntheticCache\parent.vhdx'
+        }
+        Drives=@([pscustomobject]@{Path='C:\Synthetic\Test-L2.vhdx'})
+        Adapters=@([pscustomobject]@{SwitchName='OptionalLab-Internal'})
+        Disk=[pscustomobject]@{
+            Path='C:\Synthetic\Test-L2.vhdx'; ParentPath='C:\SyntheticCache\parent.vhdx'
+            VhdType='Differencing'; Attached=$true
+        }
+        BiosGuid=[guid]'22222222-2222-2222-2222-222222222222'
+        VmName='Test-L2'; ChildPath='C:\Synthetic\Test-L2.vhdx'
+    }
+}
+$layout=New-TestContinuationLayout
+Assert-NestedContinuationLayout @layout
+Assert-True $true 'An identified running VM can complete configuration without recreation'
+$layout.Vm.State='Off'
+$layout.Disk.Attached=$false
+Assert-NestedContinuationLayout @layout
+Assert-True $true 'An identified stopped VM can be started without replacing its disk'
+foreach ($change in @(
+    {param($x) $x.Vm.Id=[guid]'33333333-3333-3333-3333-333333333333'},
+    {param($x) $x.BiosGuid=[guid]'33333333-3333-3333-3333-333333333333'},
+    {param($x) $x.Vm.Generation=1},
+    {param($x) $x.Vm.State='Paused'},
+    {param($x) $x.State.Status='Configured'},
+    {param($x) $x.State.FailureStage='Activation'},
+    {param($x) $x.Drives=@()},
+    {param($x) $x.Drives[0].Path='C:\Other.vhdx'},
+    {param($x) $x.Adapters[0].SwitchName='Other'},
+    {param($x) $x.Disk.ParentPath='C:\OtherParent.vhdx'},
+    {param($x) $x.Disk.VhdType='Dynamic'},
+    {param($x) $x.Vm.State='Off'; $x.Disk.Attached=$true}
+)) {
+    $invalidLayout=New-TestContinuationLayout
+    & $change $invalidLayout
+    Assert-Throws { Assert-NestedContinuationLayout @invalidLayout } 'Identity or layout mismatch fails closed without a fresh-creation fallback'
+}
+$builderTokens=$null
+$builderErrors=$null
+$builderAst=[Management.Automation.Language.Parser]::ParseFile(
+    (Join-Path $PSScriptRoot 'New-NestedLabFromIso.ps1'),[ref]$builderTokens,[ref]$builderErrors)
+$continuation=$builderAst.Find({
+    param($node)
+    $node -is [Management.Automation.Language.IfStatementAst] -and
+    $node.Clauses[0].Item1.Extent.Text -eq '$ContinueExistingVm' -and
+    $node.Clauses[0].Item2.Extent.Text.Contains('Assert-NestedContinuationLayout')
+},$true)
+Assert-True ($null -ne $continuation) 'Existing VM continuation has its own explicit validation branch'
+$forbidden=@($continuation.Clauses[0].Item2.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.CommandAst] -and
+    $node.GetCommandName() -in @('New-VM','New-VHD','Mount-VHD','Dismount-VHD',
+        'Mount-DiskImage','Dismount-DiskImage','New-NestedUnattendXml','Initialize-NestedNetwork.ps1')
+},$true))
+Assert-True ($forbidden.Count -eq 0) 'Continuation cannot recreate VM, disk, answer file or network and cannot unmount active disks'
+
+$sdkCatch=${function:Wait-NestedDirect}.Ast.Find({
+    param($node)
+    $node -is [Management.Automation.Language.CatchClauseAst] -and
+    $node.Extent.Text.Contains('$pipeline.InvocationStateInfo.Reason')
+},$true)
+Assert-True ($null -ne $sdkCatch) 'SDK terminating failures retain their invocation-reason error record'
+$sdkCatchBody=($sdkCatch.Body.Statements | ForEach-Object { $_.Extent.Text }) -join "`n"
+foreach ($case in @(
+    @{Message='A remote session might have ended.'; Retry=$true},
+    @{Message='A remote session might have ended. The credential is invalid.'; Retry=$false},
+    @{Message='Unclassified transport failure'; Retry=$false}
+)) {
+    $pipeline=[PowerShell]::Create()
+    try {
+        [void]$pipeline.AddScript('param($Message) $ErrorActionPreference="Stop"; function Invoke-SyntheticBootError { [CmdletBinding()] param($Text) $e=[System.Management.Automation.Remoting.PSRemotingTransportException]::new($Text); $r=[Management.Automation.ErrorRecord]::new($e,"SyntheticBoot",[Management.Automation.ErrorCategory]::OpenError,$null); $PSCmdlet.ThrowTerminatingError($r) }; Invoke-SyntheticBootError -Text $Message -ErrorAction Stop')
+        [void]$pipeline.AddParameter('Message',$case.Message)
+        $async=$pipeline.BeginInvoke()
+        if (-not $async.AsyncWaitHandle.WaitOne(10000)) { $pipeline.Stop(); throw 'Synthetic SDK test timed out' }
+        $failure=$null
+        $caught=$false
+        try { $null=$pipeline.EndInvoke($async) }
+        catch { $caught=$true; . ([scriptblock]::Create($sdkCatchBody)) }
+        Assert-True ($caught -and $pipeline.Streams.Error.Count -eq 0) 'The real SDK reproduces a stopping exception without a stream record'
+        Assert-True ($failure.Exception -is [System.Management.Automation.Remoting.PSRemotingTransportException]) 'The original transport error survives EndInvoke wrapping'
+        Assert-True ((Test-NestedBootTransportError $failure) -eq $case.Retry) 'Only the documented boot transport error is retryable; authentication and unknown failures stop'
+    } finally { $pipeline.Dispose() }
+}
 foreach ($name in @('New-NestedLabFromIso.ps1','New-NestedLab.ps1','Invoke-LabRole.ps1')) {
     $text=[IO.File]::ReadAllText((Join-Path $PSScriptRoot $name))
     Assert-True (-not ($text -match '\$vm\.BiosGuid') -and
