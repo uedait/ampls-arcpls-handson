@@ -232,18 +232,20 @@ Assert-True ($null -ne $sdkCatch) 'SDK terminating failures retain their invocat
 $sdkCatchBody=($sdkCatch.Body.Statements | ForEach-Object { $_.Extent.Text }) -join "`n"
 foreach ($case in @(
     @{Message='A remote session might have ended.'; Type='Transport'; Inner='None'; Initial=$false; Retry=$true},
-    @{Message='A remote session might have ended. The credential is invalid.'; Type='Transport'; Inner='None'; Initial=$true; Retry=$false},
+    @{Message='A remote session might have ended. The credential is invalid.'; Type='Transport'; Inner='None'; Initial=$true; Retry=$true},
     @{Message='Unclassified transport failure'; Type='Transport'; Inner='None'; Initial=$true; Retry=$true},
     @{Message='Unclassified transport failure'; Type='Transport'; Inner='None'; Initial=$false; Retry=$false},
     @{Message='Synthetic initialization failure'; Type='Data'; Inner='None'; Initial=$true; Retry=$true},
     @{Message='Synthetic initialization failure'; Type='Data'; Inner='Unknown'; Initial=$true; Retry=$true},
-    @{Message='Synthetic initialization failure'; Type='Data'; Inner='Authentication'; Initial=$true; Retry=$false},
+    @{Message='Synthetic initialization failure'; Type='Data'; Inner='Authentication'; Initial=$true; Retry=$true},
     @{Message='Synthetic initialization failure'; Type='Data'; Inner='None'; Initial=$false; Retry=$false},
-    @{Message='Access is denied.'; Type='Data'; Inner='None'; Initial=$true; Retry=$false}
+    @{Message='Access is denied.'; Type='Data'; Inner='None'; Initial=$true; Retry=$true},
+    @{Message='The credential is invalid.'; Type='Direct'; Inner='None'; Initial=$true; Retry=$true},
+    @{Message='The credential is invalid.'; Type='Direct'; Inner='None'; Initial=$false; Retry=$false}
 )) {
     $pipeline=[PowerShell]::Create()
     try {
-        [void]$pipeline.AddScript('param($Message,$Type,$Inner) $ErrorActionPreference="Stop"; function Invoke-SyntheticBootError { [CmdletBinding()] param($Text,$Kind,$InnerKind) $inner=if ($InnerKind -eq "Authentication") { [ComponentModel.Win32Exception]::new(1326) } elseif ($InnerKind -eq "Unknown") { [IO.InvalidDataException]::new("Synthetic nested failure") } else { $null }; $e=if ($Kind -eq "Data") { [System.Management.Automation.Remoting.PSRemotingDataStructureException]::new($Text,$inner) } else { [System.Management.Automation.Remoting.PSRemotingTransportException]::new($Text,$inner) }; $r=[Management.Automation.ErrorRecord]::new($e,"SyntheticBoot",[Management.Automation.ErrorCategory]::OpenError,$null); $PSCmdlet.ThrowTerminatingError($r) }; Invoke-SyntheticBootError -Text $Message -Kind $Type -InnerKind $Inner -ErrorAction Stop')
+        [void]$pipeline.AddScript('param($Message,$Type,$Inner) $ErrorActionPreference="Stop"; function Invoke-SyntheticBootError { [CmdletBinding()] param($Text,$Kind,$InnerKind) $inner=if ($InnerKind -eq "Authentication") { [ComponentModel.Win32Exception]::new(1326) } elseif ($InnerKind -eq "Unknown") { [IO.InvalidDataException]::new("Synthetic nested failure") } else { $null }; $e=if ($Kind -eq "Data") { [System.Management.Automation.Remoting.PSRemotingDataStructureException]::new($Text,$inner) } elseif ($Kind -eq "Direct") { [System.Management.Automation.Remoting.PSDirectException]::new($Text) } else { [System.Management.Automation.Remoting.PSRemotingTransportException]::new($Text,$inner) }; $r=[Management.Automation.ErrorRecord]::new($e,"SyntheticBoot",[Management.Automation.ErrorCategory]::OpenError,$null); $PSCmdlet.ThrowTerminatingError($r) }; Invoke-SyntheticBootError -Text $Message -Kind $Type -InnerKind $Inner -ErrorAction Stop')
         [void]$pipeline.AddParameter('Message',$case.Message)
         [void]$pipeline.AddParameter('Type',$case.Type)
         [void]$pipeline.AddParameter('Inner',$case.Inner)
@@ -256,9 +258,11 @@ foreach ($case in @(
         Assert-True ($caught -and $pipeline.Streams.Error.Count -eq 0) 'The real SDK reproduces a stopping exception without a stream record'
         $expectedType=if ($case.Type -eq 'Data') {
             [System.Management.Automation.Remoting.PSRemotingDataStructureException]
+        } elseif ($case.Type -eq 'Direct') {
+            [System.Management.Automation.Remoting.PSDirectException]
         } else { [System.Management.Automation.Remoting.PSRemotingTransportException] }
         Assert-True ($failure.Exception -is $expectedType) 'The original remoting error survives EndInvoke wrapping'
-        Assert-True ((Test-NestedBootTransportError $failure -InitialBoot:$case.Initial) -eq $case.Retry) 'SDK remoting errors obey initial-boot and authentication gates'
+        Assert-True ((Test-NestedBootTransportError $failure -InitialBoot:$case.Initial) -eq $case.Retry) 'SDK remoting errors retry during initial setup and preserve normal connection behavior'
     } finally { $pipeline.Dispose() }
 }
 foreach ($name in @('New-NestedLabFromIso.ps1','New-NestedLab.ps1','Invoke-LabRole.ps1')) {
@@ -461,28 +465,38 @@ $protocol=New-SyntheticProtocolRecord
 Assert-True (Test-NestedBootTransportError $protocol -InitialBoot) 'Retry protocol initialization only during initial boot'
 Assert-True (-not (Test-NestedBootTransportError $protocol)) 'Normal connections reject data structure failures'
 foreach ($category in @('SecurityError','PermissionDenied','AuthenticationError')) {
-    Assert-True (-not (Test-NestedBootTransportError (New-SyntheticProtocolRecord -Category $category) -InitialBoot)) 'Structured authentication categories stop without English messages'
+    $failure=New-SyntheticProtocolRecord -Category $category
+    Assert-True (Test-NestedBootTransportError $failure -InitialBoot) 'Initial setup retries connection refusals regardless of authentication category'
+    Assert-True (-not (Test-NestedBootTransportError $failure)) 'Normal connections still reject authentication categories'
 }
 foreach ($code in @(5,86,1326,1327,1328,1329,1330,1331,1385,1907,1909)) {
     $failure=New-SyntheticTransportRecord 'A remote session might have ended.'
     $failure.Exception.ErrorCode=$code
-    Assert-True (-not (Test-NestedBootTransportError $failure -InitialBoot)) 'Structured authentication error codes stop'
+    Assert-True (Test-NestedBootTransportError $failure -InitialBoot) 'Initial setup retries connection refusals regardless of authentication code'
+    Assert-True (-not (Test-NestedBootTransportError $failure)) 'Normal connections still reject authentication codes'
 }
 $inner=[ComponentModel.Win32Exception]::new(1326)
 $failure=[Management.Automation.ErrorRecord]::new(
     [Management.Automation.Remoting.PSRemotingTransportException]::new('A remote session might have ended.',$inner),
     'SyntheticInnerAuthentication',[Management.Automation.ErrorCategory]::OpenError,$null)
-Assert-True (-not (Test-NestedBootTransportError $failure -InitialBoot)) 'Inner native logon failure stops'
+Assert-True (Test-NestedBootTransportError $failure -InitialBoot) 'Initial setup retries inner native logon failures'
+Assert-True (-not (Test-NestedBootTransportError $failure)) 'Normal connections still reject inner native logon failures'
 $nestedProtocol=New-SyntheticProtocolRecord -Inner ([IO.InvalidDataException]::new('SyntheticInnerSecretNeverLog'))
 Assert-True (Test-NestedBootTransportError $nestedProtocol -InitialBoot) 'Initial connection retries do not depend on the presence of inner exceptions'
 Assert-True (-not (Test-NestedBootTransportError $nestedProtocol)) 'Normal connections still reject nested protocol failures'
 Assert-True (Test-NestedBootTransportError (New-SyntheticTransportRecord 'Synthetic localized connection failure') -InitialBoot) 'Initial transport retries do not depend on English wording'
 Assert-True (Test-NestedBootTransportError (New-SyntheticProtocolRecord -Message 'Preparing credentials and authentication services') -InitialBoot) 'Mentioning credentials alone does not mean rejection'
-Assert-True (-not (Test-NestedBootTransportError (New-SyntheticProtocolRecord -Message 'The credential is invalid.') -InitialBoot)) 'Protocol errors cannot mask credential rejection'
+Assert-True (Test-NestedBootTransportError (New-SyntheticProtocolRecord -Message 'The credential is invalid.') -InitialBoot) 'Initial setup does not stop at an invalid-credential message'
 $nestedAuth=New-SyntheticProtocolRecord -Inner ([ComponentModel.Win32Exception]::new(1326))
-Assert-True ((Get-NestedBootConnectionDecision $nestedAuth -InitialBoot) -eq 'AuthenticationCode') 'Inner authentication codes take priority over initial-boot retry'
-Assert-True ((Get-NestedBootConnectionDecision (New-SyntheticProtocolRecord -Category PermissionDenied) -InitialBoot) -eq 'AuthenticationCategory') 'Authentication categories have a fixed diagnostic reason'
-Assert-True ((Get-NestedBootConnectionDecision (New-SyntheticProtocolRecord -Message 'Authentication failed') -InitialBoot) -eq 'AuthenticationMessage') 'Explicit authentication rejection has a fixed diagnostic reason'
+Assert-True ((Get-NestedBootConnectionDecision $nestedAuth -InitialBoot) -eq 'InitialBootConnection') 'Initial setup takes priority over authentication rejection'
+Assert-True ((Get-NestedBootConnectionDecision $nestedAuth) -eq 'AuthenticationCode') 'Normal authentication rejection retains its numeric diagnostic reason'
+Assert-True ((Get-NestedBootConnectionDecision (New-SyntheticProtocolRecord -Category PermissionDenied)) -eq 'AuthenticationCategory') 'Normal authentication categories have a fixed diagnostic reason'
+Assert-True ((Get-NestedBootConnectionDecision (New-SyntheticProtocolRecord -Message 'Authentication failed')) -eq 'AuthenticationMessage') 'Normal explicit authentication rejection has a fixed diagnostic reason'
+$directAuth=[Management.Automation.ErrorRecord]::new(
+    [Management.Automation.Remoting.PSDirectException]::new('The credential is invalid.'),
+    'SyntheticDirectAuthentication',[Management.Automation.ErrorCategory]::OpenError,$null)
+Assert-True (Test-NestedBootTransportError $directAuth -InitialBoot) 'The observed PSDirect authentication exception retries during initial setup'
+Assert-True (-not (Test-NestedBootTransportError $directAuth)) 'PSDirect authentication rejection still stops a normal connection'
 $unknown=[Management.Automation.ErrorRecord]::new([InvalidOperationException]::new('Synthetic'),'Synthetic',
     [Management.Automation.ErrorCategory]::OpenError,$null)
 Assert-True (-not (Test-NestedBootTransportError $unknown -InitialBoot)) 'Unknown exception types stop even during initial boot'
@@ -582,14 +596,23 @@ Assert-True ($wait.Records[0].ExceptionChain.Count -eq 2 -and
 $diagnostic=$wait.Records | ConvertTo-Json -Depth 6
 Assert-True (-not $diagnostic.Contains('SyntheticInnerSecretNeverLog') -and -not $diagnostic.Contains('SyntheticSecretErrorId')) 'Inner exception messages and raw IDs are not logged'
 $wait=Invoke-TestDirectWait -Failures @($nestedAuth) -InitialBoot
-Assert-True ($wait.Failed -and $wait.Seconds -eq 0 -and $wait.Records[0].Decision -eq 'AuthenticationCode' -and
-    $wait.Records[0].ExceptionChain[1].NativeErrorCode -eq 1326) 'Inner authentication rejection stops immediately and preserves the numeric cause'
+Assert-True ($wait.Succeeded -and $wait.Seconds -eq 10 -and $wait.Records[0].Decision -eq 'InitialBootConnection' -and
+    $wait.Records[0].ExceptionChain[1].NativeErrorCode -eq 1326) 'Initial authentication rejection retries and preserves the numeric cause'
+$wait=Invoke-TestDirectWait -Failures @($nestedAuth)
+Assert-True ($wait.Failed -and $wait.Seconds -eq 0 -and $wait.Records[0].Decision -eq 'AuthenticationCode') 'Normal authentication rejection still stops immediately'
 $wait=Invoke-TestDirectWait -Failures @((New-SyntheticTransportRecord 'Synthetic localized connection failure')) -InitialBoot
 Assert-True ($wait.Succeeded -and $wait.Seconds -eq 10) 'An arbitrary transport message retries through the full wait loop'
 $wait=Invoke-TestDirectWait -Failures @($protocol)
 Assert-True ($wait.Failed -and $wait.Pipelines.Count -eq 1 -and $wait.Seconds -eq 0 -and $wait.Records[0].Status -eq 'Rejected') 'Ordinary connections fail immediately on protocol errors'
 $wait=Invoke-TestDirectWait -Failures @((New-SyntheticProtocolRecord -Category AuthenticationError)) -InitialBoot
-Assert-True ($wait.Failed -and $wait.Pipelines.Count -eq 1 -and $wait.Seconds -eq 0) 'Initial boot does not retry structured authentication failures'
+Assert-True ($wait.Succeeded -and $wait.Pipelines.Count -eq 2 -and $wait.Seconds -eq 10) 'Initial boot retries structured authentication failures'
+$observedBootFailure=New-SyntheticProtocolRecord -Inner (
+    [Management.Automation.PSInvalidOperationException]::new('A remote session might have ended.'))
+$wait=Invoke-TestDirectWait -Failures @($observedBootFailure,$directAuth) -InitialBoot -FirstAttemptSeconds 30
+Assert-True ($wait.Succeeded -and $wait.Pipelines.Count -eq 3 -and $wait.Seconds -eq 50 -and
+    @($wait.Records | Where-Object Status -eq 'Retry').Count -eq 2 -and $wait.Records[-1].Status -eq 'Opened') 'The observed boot transport then PSDirect credential rejection sequence reaches an open session without intervention'
+$wait=Invoke-TestDirectWait -Failures @($directAuth) -InitialBoot -RepeatFailure
+Assert-True ($wait.Failed -and $wait.Seconds -eq 180 -and $wait.Records[-1].Status -eq 'Timeout') 'Persistent initial PSDirect failures stop at the existing deadline'
 $wait=Invoke-TestDirectWait -Failures @($unknown) -InitialBoot
 Assert-True ($wait.Failed -and $wait.Seconds -eq 0) 'Unknown exceptions fail without sleeping'
 $wait=Invoke-TestDirectWait -Failures @($protocol) -InitialBoot -RepeatFailure

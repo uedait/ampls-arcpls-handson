@@ -327,6 +327,12 @@ function Assert-NestedSha256 {
 
 function Get-NestedBootConnectionDecision {
     param([System.Management.Automation.ErrorRecord]$Failure, [switch]$InitialBoot)
+    if ($InitialBoot -and (
+        $Failure.Exception -is [System.Management.Automation.Remoting.PSDirectException] -or
+        $Failure.Exception -is [System.Management.Automation.Remoting.PSRemotingTransportException] -or
+        $Failure.Exception -is [System.Management.Automation.Remoting.PSRemotingDataStructureException])) {
+        return 'InitialBootConnection'
+    }
     $authCategories=@('SecurityError','PermissionDenied','AuthenticationError')
     if ($Failure.CategoryInfo.Category -in $authCategories) { return 'AuthenticationCategory' }
     $exception = $Failure.Exception
@@ -342,11 +348,6 @@ function Get-NestedBootConnectionDecision {
             return 'AuthenticationMessage'
         }
         $exception = $exception.InnerException
-    }
-    if ($InitialBoot -and (
-        $Failure.Exception -is [System.Management.Automation.Remoting.PSRemotingTransportException] -or
-        $Failure.Exception -is [System.Management.Automation.Remoting.PSRemotingDataStructureException])) {
-        return 'InitialBootConnection'
     }
     if ($Failure.Exception -is [System.Management.Automation.Remoting.PSRemotingTransportException]) {
         if ($Failure.Exception.Message -match 'A remote session might have ended\.') { return 'BootTransport' }
