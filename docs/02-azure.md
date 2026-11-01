@@ -4,13 +4,13 @@
 
 ## この章の完了条件
 
-対象 Azure VM の AMA が DCE から設定を取得し、LAW の公開取り込みを無効にした状態で、検証用イベントと Heartbeat が到着します。名前解決と実際の接続先が AMPLS PE の IP であることも確認します。
+対象 Azure VM の Azure Monitor Agent（AMA）が Data Collection Endpoint（DCE）から設定を取得し、Log Analytics Workspace（LAW）へ新しい Heartbeat を送信することを確認します。合格には、DCE の公開アクセス無効、LAW の公開取り込み無効、Azure Monitor Private Link Scope（AMPLS）の取り込み PrivateOnly、Restricted NSG、DNS と TCP の成功、AMA 自身の DCE と LAW への接続先がそれぞれ Private Endpoint（PE）の IP、制限確認後の新しい Heartbeat のすべてが必要です。Windows イベントの生成と確認は任意試験です。
 
 以下は新規の専用収集リソースを作る手順です。同じ DNS 解決範囲に既存 AMPLS がある場合は、[事前確認](prerequisites.md)で競合と影響を確認し、管理者の承認を得てから進めてください。
 
 ①のラボでは workload VM の専用 PIP を維持し、NIC NSG は Restricted の状態で実施します。AMA の初回配布に公開宛先が必要な場合は、配布先と必要な通信を特定して変更を承認してください。配布用の例外は対象・期間を限定し、例外終了後の Restricted 状態で閉域収集の合否を判定します。
 
-### 画面例の環境と撮影方法
+### 画面例の環境
 
 画面例は 2026 年 10 月 31 日の Azure Portal で撮影した実画面です。名前は次の専用ラボの値を使用しています。実施時には、作成先、名前、ID、FQDN、観測時刻を承認した環境の値に置き換えてください。
 
@@ -23,7 +23,7 @@
 | DCR | `dcr-lab1031-windows` |
 | hub / PE subnet | `lab1031-hub` / `snet-pe` |
 
-撮影時のリソース作成・設定変更には、承認した構成を保存した Bicep と PowerShell スクリプトを使用しました。Portal の入力例では作成・設定変更を確定するボタンは押していません。作成後の画面では実際の設定を照合しています。VM 内の検証と合成イベント生成には Managed Run Command を使用しました。サインイン画面、パスワード、認証コードは撮影していません。個人情報を含むサブスクリプション表示などはマスクしています。
+画面例は操作箇所を示します。過去のログ結果は今回の合格判定に使わず、実施者が今回の対象と時刻で確認してください。認証情報は画像や作業記録に含めないでください。
 
 ## 2-1. Log Analytics Workspace を作成する
 
@@ -47,7 +47,7 @@
 
    ![LAW の作成先、名前、リージョンと従量課金プランの確認画面](images/02-azure/2-1-03-law-review.png)
 
-4. 作成後の「概要」で Workspace ID と完全なリソース ID を記録します。
+4. 作成後の「概要」で、作成したワークスペースを確認します。
 
    ![作成した LAW の概要と Workspace ID](images/02-azure/2-1-04-law-overview.png)
 
@@ -59,15 +59,9 @@
 
    ![LAW の保持期間を30日に設定した確認画面](images/02-azure/2-1-07-law-retention.png)
 
-6. 「ネットワークの分離 → Public access → 管理」で取り込みの公開アクセスを制限します。画面例では `Ingestion access` を「制限されたパブリック受信、有効なパブリック送信」、`Query access` を「すべてのネットワークから有効」に設定しています。従来の画面では、取り込みの公開アクセスを「無効 / いいえ」にします。作成直後にこの項目が選べない場合は、2-4 の PE 承認後、**AMA を関連付ける前に**設定します。
+公開取り込みの制限は、初回 Heartbeat を確認した後の [2-8](#restricted-check) で行います。既に制限済みの環境は、その設定を維持してください。Portal で結果を見るため、クエリの公開アクセスは有効のままにします。閲覧には Azure の認証と RBAC の閲覧権限が必要です。
 
-   ![PE 承認後の LAW の取り込み制限と公開クエリ許可を確認した画面](images/02-azure/2-1-08-law-isolation.png)
-
-   ARM の設定値では、`publicNetworkAccessForIngestion=Disabled`、`publicNetworkAccessForQuery=Enabled` に対応します。
-
-クエリの公開アクセスは、本ハンズオンでは承認した閲覧端末から Portal の Logs を使える設定を維持します。取り込みとクエリのアクセス設定は個別に確認してください。クエリも閉域にする場合は、閲覧端末に PE の名前解決・接続経路を用意してから変更します。
-
-**確認**: LAW の Provisioning state が Succeeded。作成先とリージョンが記録どおりであること。
+確認: 概要で「成功」と、指定した RG・リージョンを確認します。
 
 ## 2-2. Data Collection Endpoint を作成する
 
@@ -85,11 +79,20 @@
 
    ![DCE の入力値の確認画面](images/02-azure/2-2-04-dce-review.png)
 
-4. DCE の概要にある「構成アクセス エンドポイント」のホスト名を記録します。URL の `https://` や末尾のパスを除いた FQDN を、後で DNS 検証に使用します。
+4. DCE の「概要」の右上にある「構成アクセス」の値をコピーします。「ログ インジェスト」の行は使いません。
 
    ![作成した DCE の概要と構成アクセスエンドポイント](images/02-azure/2-2-05-dce-overview.png)
 
-DCE は AMA が DCR 等の設定を取得するために必要です。本編の Windows Event の送信先は LAW です。2-6 で DCE を対象 VM の設定取得先として関連付けてください。
+<a id="dce-fqdn"></a>
+
+DNS 検証に使う DCE FQDN は、この「構成アクセス」の URL のホスト名です。画面例の完全な値は `dce-lab1031-e74e.japaneast-1.handler.control.monitor.azure.com` です。名前から推測せず、今回のリソースの値をコピーしてください。URL から取り出す場合は VM の Windows PowerShell で次を使用します。
+
+```powershell
+$configurationAccess = '<今回コピーした構成アクセス URL 全体>'
+([uri]$configurationAccess).DnsSafeHost
+```
+
+DCE は AMA が Data Collection Rule（DCR）の設定を取得するために必要です。DCR は収集対象と保存先を定義し、送信先は LAW です。2-6 で DCE を対象 VM の設定取得先として関連付けてください。
 
 **確認**: DCE と VM のリージョンが一致すること。
 
@@ -108,7 +111,7 @@ DCE は AMA が DCR 等の設定を取得するために必要です。本編の
 
    ![AMPLS の入力値とアクセスモードの確認画面](images/02-azure/2-3-04-ampls-review.png)
 
-4. 作成した AMPLS を開き、「Azure Monitor リソース」で「追加」を選びます。
+4. 作成した AMPLS を開き、「構成 → Azure Monitor リソース」で「追加」を選びます。
 
    ![作成した AMPLS の概要](images/02-azure/2-3-05-ampls-overview.png)
 
@@ -122,7 +125,9 @@ DCE は AMA が DCR 等の設定を取得するために必要です。本編の
 
 AMA の設定取得には DCE、ログ送信には LAW の関連付けを使用します。DCR は 2-6 で対象 VM に関連付けてください。
 
-**確認**: AMPLS の関連付け一覧に LAW と DCE の2件があること。既存の関連付けも作業前の記録どおり維持されていること。
+<a id="ampls-resources"></a>
+
+確認: AMPLS の「構成 → Azure Monitor リソース」で、今回の LAW と DCE の2行を確認します。[一覧の画面例](images/02-azure/2-3-06-ampls-resources.png)と照合し、既存の関連付けも維持します。
 
 ## 2-4. AMPLS の Private Endpoint と DNS を構成する
 
@@ -145,7 +150,7 @@ AMA の設定取得には DCE、ログ送信には LAW の関連付けを使用�
 
    ![hub VNet、snet-pe と動的 IP 割り当ての選択画面](images/02-azure/2-4-04-pe-vnet.png)
 
-3. DNS は、次の5 zone と整合する構成にします。既存 zone がある場合は、管理者が承認した zone を選んで統合してください。
+3. DNS タブで「プライベート DNS ゾーンと統合する」を「はい」にします。承認済みの既存ゾーンがなければ、次の5つのゾーンを新規作成する設定にし、各ゾーンの作成先 RG を確認します。画面にゾーン名が自動表示される場合は手入力不要です。手動で作成する場合は、次の名前をそのまま入力します。既存ゾーンを再利用する場合は、今回の利用を承認したゾーンだけを選択してください。
 
    ```text
    privatelink.monitor.azure.com
@@ -163,7 +168,7 @@ AMA の設定取得には DCE、ログ送信には LAW の関連付けを使用�
 
    ![PE の作成後に hub、subnet、NIC と承認済み状態を確認した概要](images/02-azure/2-4-07-pe-overview.png)
 
-5. 各 Private DNS zone の「仮想ネットワーク リンク」で、**Resolver Inbound endpoint がある hub VNet**へのリンクを確認します。リンクの自動登録は無効にしてください。
+5. 各 Private DNS zone の「仮想ネットワーク リンク」で、Resolver Inbound endpoint がある hub VNet へのリンクを確認し、なければ追加します。自動登録は無効にします。PE の A レコードは PE の DNS 統合で管理します。このゾーンへの VM 名の自動登録は不要です。自動登録が無効でも、リンクを通じた名前解決は利用できます。
 
    ![Monitor zone の hub リンク、Completed と自動登録無効](images/02-azure/2-4-10-monitor-link.png)
 
@@ -181,46 +186,57 @@ AMA の設定取得には DCE、ログ送信には LAW の関連付けを使用�
 
    ![Private DNS zone と実際の A レコード、IP、zone group の一覧](images/02-azure/2-4-09-pe-zone-records.png)
 
-7. AMPLS 側の PE 接続と、LAW / DCE の関連付けが残っていることを確認します。
-8. LAW の公開取り込みが無効であることを再確認します。DCE のネットワーク分離でも、Private Link からの設定取得を維持したまま公開アクセスを無効にします。
+<a id="law-ods-fqdn"></a>
 
-   DCE の画面例では「ネットワークの分離 → Public access → 管理」で「制限されたパブリック受信、有効なパブリック送信」を確認します。ARM では `networkAcls.publicNetworkAccess=Disabled` に対応します。
+   LAW の DNS 検証には、PE の「DNS の構成」で公開 FQDN `<guid>.ods.opinsights.azure.com` の行をコピーします。`privatelink` を含む別名は使いません。同じ行の Private IP を LAW の比較対象にします。Workspace ID を別途記録して組み立てる必要はありません。DCE の比較対象 IP も、[構成アクセス FQDN](#dce-fqdn)に対応する PE の行で確認します。
 
-   ![DCE の公開アクセス制限を確認した画面](images/02-azure/2-4-15-dce-isolation.png)
+<a id="ampls-pe-approved"></a>
+
+7. AMPLS の「構成 → プライベート エンドポイント接続」で、今回の `pe-ampls-lab1031` の行が `Approved` であることを確認します。
+
+   ![AMPLS のプライベートエンドポイント接続の確認場所](images/02-azure/2-4-01-pe-connections.png)
+
+   ![作成した PE の承認済み状態](images/02-azure/2-4-07-pe-overview.png)
+
+8. 同じ AMPLS の「構成 → Azure Monitor リソース」で、今回の LAW と DCE の2行を確認します。
+
+   ![LAW と DCE の関連付け一覧](images/02-azure/2-3-06-ampls-resources.png)
+
+公開アクセスの制限は [2-8](#restricted-check) で行います。既に制限済みなら維持します。
 
 **確認**: PE は複数の IP を使用します。必要な IP の確保と接続承認の完了を確認してから進んでください。AMPLS の PE には少なくとも /27 の subnet が必要で、このサンプルは /24 を使用します。
 
+<a id="vm-dns-tcp"></a>
+
 ## 2-5. Azure VM から名前解決する
 
-1. 専用の対象 Azure VM に、承認された管理接続でサインインします。①の講師用ラボでは、workload VM の「接続 → Bastion」から接続してください。
+1. 対象 Azure VM の「接続 → Bastion」からサインインします。既存環境は承認済みの管理接続を使用します。VM の管理者ユーザー名は構築担当者から取得し、認証情報を手順書や作業記録に記載しないでください。Bastion の利用権限と VM のサインイン権限が必要です。VM のスタートメニューで「Windows PowerShell」を検索し、「管理者として実行」で Windows PowerShell 5.1 を開きます。
 2. DNS は既存の設計を維持します。任意ラボは Resolver Inbound IP を使用します。お客様環境では、既存 DNS が対象公開ドメインを Resolver へ転送する経路を管理者が用意してください。
-3. Windows PowerShell で、記録した実際の値を使用します。
+3. 次の取得場所から値をコピーし、VM の Windows PowerShell 5.1 で実行します。
+
+   | 入力値 | 取得場所 |
+   |---|---|
+   | DCE FQDN | [DCE 概要の「構成アクセス」](#dce-fqdn)のホスト名 |
+   | LAW ODS FQDN | [PE の「DNS の構成」](#law-ods-fqdn)の公開 ODS FQDN |
+   | 各 FQDN の比較対象 IP | 同じ [PE の「DNS の構成」](#law-ods-fqdn)の対応する Private IP |
 
    ```powershell
+   $dceFqdn = '<コピーした DCE の構成アクセス FQDN>'
+   $lawFqdn = '<コピーした LAW の公開 ODS FQDN>'
    Get-DnsClientServerAddress -AddressFamily IPv4
-   Resolve-DnsName '<DCE の構成アクセス FQDN>'
-   Resolve-DnsName '<Workspace ID>.ods.opinsights.azure.com'
-   Test-NetConnection '<DCE の構成アクセス FQDN>' -Port 443
-   Test-NetConnection '<Workspace ID>.ods.opinsights.azure.com' -Port 443
+   foreach ($fqdn in @($dceFqdn, $lawFqdn)) {
+       Resolve-DnsName -Name $fqdn -ErrorAction Stop
+       Test-NetConnection -ComputerName $fqdn -Port 443
+   }
    ```
 
 **期待結果**: A レコードの IP が PE 一覧に含まれ、TCP 443 が成功します。CNAME 自体は公開ドメインでも、最終的な A レコードが PE の IP なら想定した解決です。ログの到着は 2-7 で別途確認してください。
 
-画面例の検証では、保存したスクリプトを Managed Run Command で実行し、API の成功とは別にゲストの `executionState=Succeeded` と `exitCode=0` を照合しています。
-
-![ネットワーク検証に使用した Managed Run Command の作成後状態](images/02-azure/2-5-01-network-runcommand.png)
-
-| 観測対象 | 画面例の実測値 |
-|---|---|
-| VM の DNS サーバー | `10.20.2.4` |
-| DCE の構成アクセス FQDN の最終 A / TCP443 接続先 | `10.20.1.7` / 成功 |
-| LAW の ODS FQDN の最終 A / TCP443 接続先 | `10.20.1.5` / 成功 |
-| AMA の設定取得接続 | `MonAgentManager.exe`、TCP443、`10.20.1.7` |
-| AMA のログ送信接続 | `MonAgentCore.exe`、TCP443、`10.20.1.5` |
-
-AMA の接続は短時間で終了する場合があります。画面例では接続の観測時間を延ばし、両接続の PID を AMA の実行ファイルと照合しました。名前解決と `Test-NetConnection` の成功に加えて、AMA 自身の接続先と 2-7 のログ到着を確認してください。
+このコマンドは VM からの到達性を確認します。AMA 自身が利用した接続先は、導入後の [2-8](#ama-peers) で別途確認します。
 
 ## 2-6. DCR を作成し AMA と DCE を関連付ける
+
+本手順は動作確認済みの Windows イベント DCR を使用します。Heartbeat は AMA の稼働に伴って自動送信されるため、DCR のデータソースとして「Heartbeat」を選択する操作はありません。以下の XPath と LAW 宛先は構成に残し、イベントの生成だけを任意試験に分けます。
 
 1. Portal の「モニター → 設定 → データ収集ルール → データ収集ルールの作成」を開きます。
 
@@ -273,9 +289,15 @@ AMA の接続は短時間で終了する場合があります。画面例では�
 
     ![DCE のリソース一覧に workload VM が1件関連付いている画面](images/02-azure/2-6-11-dce-resources.png)
 
-AMA を明示的に直接接続へ設定します。管理端末の PowerShell 7 で、Azure CLI に対象テナントでサインインし、`az account show` の tenant / subscription を目視でも照合してから実行してください。スクリプトが同じ照合を行い、対象の AMA が存在しない場合は停止します。
+AMA はプロキシを使わない直接接続 `proxy.mode=none` が必須です。対象 VM の AMA 拡張機能の「JSON ビュー」で settings の proxy を確認し、既存の設定・導入時の設定記録も照合します。proxy 設定がない新規ラボは既定の直接接続を使用します。ほかの proxy 設定がある場合、または直接接続を確認できない場合は、次の補助操作で `none` を明示設定してから進めます。
 
-Portal で設定取得用 DCE の関連付けが選べない場合は、管理端末で次の補助スクリプトを使用します。別の DCE が既に関連付いている場合は、置き換えず停止します。
+### 必要な場合だけ使う管理端末の補助操作
+
+操作場所はリポジトリを配置した管理端末の PowerShell 7 です。VM 内では実行しません。承認済みの変更範囲を確認し、事前確認の証明書で Azure CLI に `az login` し、`.env` の tenant / subscription / client ID と認証種別を実際の接続先と照合してください。`az account show` の tenant / subscription も確認します。
+
+Tenant ID と Subscription ID は事前確認の承認記録から取得します。VM と DCE の完全なリソース ID が必要な場合は、そのリソースの Portal「概要 → JSON ビュー」の `id` をコピーします。VM の RG と名前は VM の概要で確認します。
+
+Portal で設定取得用 DCE を関連付けられない場合だけ、リポジトリのルートで次を実行します。VM に DCE 関連付けを作成します。別の DCE が既に関連付いている場合は、置き換えず停止します。
 
 ```powershell
 .\scripts\Set-DceAssociation.ps1 `
@@ -284,6 +306,8 @@ Portal で設定取得用 DCE の関連付けが選べない場合は、管理�
   -ResourceId '<Azure VM の完全なリソース ID>' `
   -DceId '<DCE の完全なリソース ID>'
 ```
+
+既存 proxy がある場合、または直接接続を確認できない場合だけ、次を実行して AMA の proxy を `none` に変更します。
 
 ```powershell
 .\scripts\Set-AmaDirect.ps1 `
@@ -294,39 +318,157 @@ Portal で設定取得用 DCE の関連付けが選べない場合は、管理�
   -MachineName '<Azure VM 名>'
 ```
 
-この設定で Agent は `{"proxy":{"mode":"none"}}` を使用します。スクリプトは既存 settings を取得し、proxy だけを変更して、ほかの設定を維持します。
+`Set-AmaDirect.ps1` は対象 VM の AMA 拡張機能に `{"proxy":{"mode":"none"}}` を設定します。既存 settings のうち proxy だけを変更し、ほかの設定を維持します。
 
 **確認**: AMA の導入成功、DCR 関連付け、設定取得用 DCE 関連付けの3点を記録してください。これらをそろえてからログの到着を確認します。
 
-## 2-7. 検証用イベントを1件送る
+## 2-7. 初回 Heartbeat を確認する
 
-1. 対象 Azure VM で `scripts\Write-HandsonEvent.ps1` を用意します。①の自動構築では VM が取得・検証した同じコミットのソースに含まれるファイルを使用してください。既存環境に配置する場合は、承認された転送手段を使用します。
-2. 管理者の Windows PowerShell で実行します。
+操作場所は Portal の今回の LAW「ログ」です。「作業モード」を「KQL モード」にし、「表示 → カスタム」で100件を指定します。対象 VM の「概要 → JSON ビュー」の `id` をコピーし、次の `targetResourceId` に貼り付けます。対象 VM の Computer と `_ResourceId` を照合してください。
+
+```kusto
+let targetResourceId = "<対象 Azure VM の JSON ビューの id>";
+Heartbeat
+| where TimeGenerated > ago(30m)
+| where _ResourceId =~ targetResourceId
+| where Category == "Azure Monitor Agent"
+| project TimeGenerated, IngestedAt=ingestion_time(), Computer, _ResourceId
+| order by TimeGenerated desc
+| take 100
+```
+
+確認: 対象 VM の Heartbeat が到着します。初回設定の反映を15分程度待ち、到着しなければ検索期間、0件またはエラー、確認 UTC 時刻を記録して[障害調査](troubleshooting.md)へ進みます。初回到着だけでは閉域収集の合格としません。既に制限済みのラボも公開アクセスを再び有効にせず、次の設定確認と新規記録の試験を実施します。
+
+<a id="restricted-check"></a>
+
+## 2-8. 公開取り込みを制限して閉域収集を確認する
+
+1. Portal の LAW「ネットワークの分離 → Public access → 管理」で、`Ingestion access` を「制限されたパブリック受信、有効なパブリック送信」にします。従来の画面では取り込みの公開アクセスを「無効 / いいえ」にします。`Query access` は「すべてのネットワークから有効」のまま維持します。検索には認証と RBAC 権限が必要です。
+
+   ![LAW の取り込み制限と公開クエリ許可](images/02-azure/2-1-08-law-isolation.png)
+
+2. DCE の「ネットワークの分離 → Public access → 管理」でも「制限されたパブリック受信、有効なパブリック送信」にして公開アクセスを無効にします。Private Link の設定取得を維持します。
+
+   ![DCE の公開アクセス制限](images/02-azure/2-4-15-dce-isolation.png)
+
+3. 保存・反映後の画面で LAW の取り込み無効、DCE の公開アクセス無効、AMPLS の取り込み PrivateOnly を確認します。[PE の Approved](#ampls-pe-approved)と [LAW / DCE の2行](#ampls-resources)、①の Restricted NSG も確認します。既に制限済みなら変更せず、現在の値を記録します。VM の PowerShell で次を実行し、この確認後の UTC 時刻を基準時刻として保存します。
 
    ```powershell
-   .\Write-HandsonEvent.ps1
+   [datetime]::UtcNow.ToString('o')
    ```
 
-3. 出力された Marker、生成 UTC 時刻、Computer を作業記録に残します。
-4. Portal の LAW →「ログ」で、[結果の確認](validation.md)の KQL を実行します。
+4. [2-5](#vm-dns-tcp)の DNS / TCP コマンドを再実行し、DCE と LAW の最終 A レコードがそれぞれ PE 一覧の対応する IP、TCP 443 が成功であることを確認します。
 
-   「作業モード」を「KQL モード」にします。「表示」の件数は「カスタム → 100」で指定し、KQL にも `take 100` を含めます。今回生成した Marker と対象 VM の `_ResourceId` で絞り込んでください。
+<a id="ama-peers"></a>
 
-   ![Log Analytics の結果表示上限をカスタム100件に指定した画面](images/02-azure/2-7-01-query-limit.png)
+5. 同じ VM の管理者 Windows PowerShell 5.1 で次を実行します。最大5分、2秒間隔で AMA 自身の TCP 443 接続を読み取り、PID と実行ファイルを照合します。AMA の再起動や設定変更は行いません。
 
-   画面例では、同じ検証イベントを繰り返し生成せずに結果を撮影するため、検索期間を `2026-10-31 07:23:00〜07:53:00 UTC` の30分に固定しています。実施時には今回の生成 UTC 時刻を含む30分へ置き換えてください。時刻を KQL で指定すると、Portal は「時間の範囲: クエリに設定」と表示します。
+   ```powershell
+   $deadline = [datetime]::UtcNow.AddMinutes(5)
+   $seen = @{}
+   do {
+       $connections = @(Get-NetTCPConnection -State Established -ErrorAction Stop |
+           Where-Object { $_.RemotePort -eq 443 })
+       foreach ($connection in $connections) {
+           $owner = Get-Process -Id $connection.OwningProcess -ErrorAction SilentlyContinue
+           if ($null -eq $owner -or $owner.ProcessName -notin @('MonAgentManager', 'MonAgentCore')) {
+               continue
+           }
+           try { $path = $owner.Path } catch { $path = $null }
+           if ([string]::IsNullOrWhiteSpace($path)) { continue }
+           $key = '{0}|{1}|{2}' -f $owner.Id, $path, $connection.RemoteAddress
+           if (-not $seen.ContainsKey($key)) {
+               $seen[$key] = $true
+               [pscustomobject]@{
+                   ObservedUtc = [datetime]::UtcNow.ToString('o')
+                   ProcessId = $owner.Id
+                   ProcessPath = $path
+                   RemoteAddress = $connection.RemoteAddress
+                   RemotePort = $connection.RemotePort
+               }
+           }
+       }
+       Start-Sleep -Seconds 2
+   } while ([datetime]::UtcNow -lt $deadline)
+   ```
 
-   ![今回の Marker と対象 VM、UTC30分、上限100件を指定した Event KQL](images/02-azure/2-7-02-event-query.png)
+   `ProcessPath` が対象 VM の AMA の実行ファイルであることを確認します。`MonAgentManager.exe` の接続先を DCE の PE IP、`MonAgentCore.exe` の接続先を LAW の PE IP と照合してください。短時間の接続は取得できない場合があります。5分で片方でも取得できなければ「接続未取得」と記録し、合格にはしません。必要なら同じ上限で再観測し、待機時間と結果を記録します。DNS / TCP の成功を AMA の実接続の証拠にはしません。
 
-   ![今回の Marker を含むイベント1件と生成・取り込み UTC 時刻の結果](images/02-azure/2-7-03-event-result.png)
+6. LAW の「ログ」で、基準 UTC 時刻を `restrictedSince` に、VM の JSON ビューの `id` を `targetResourceId` に貼り付けて実行します。
 
-   ![同じ対象 VM と UTC30分、上限100件で Heartbeat を集計する KQL](images/02-azure/2-7-04-heartbeat-query.png)
+   ```kusto
+   let targetResourceId = "<対象 Azure VM の JSON ビューの id>";
+   let restrictedSince = todatetime("<設定確認後に記録した UTC 時刻>");
+   Heartbeat
+   | where TimeGenerated > ago(30m)
+   | where _ResourceId =~ targetResourceId
+   | where Category == "Azure Monitor Agent"
+   | where TimeGenerated > restrictedSince and ingestion_time() > restrictedSince
+   | project TimeGenerated, IngestedAt=ingestion_time(), Computer, _ResourceId
+   | order by TimeGenerated desc
+   | take 100
+   ```
 
-   ![同じ30分に対象 VM の Heartbeat が30件到着した結果](images/02-azure/2-7-05-heartbeat-result.png)
+確認: 生成時刻と取り込み時刻が両方とも基準時刻より後の Heartbeat が到着し、上記の設定、DNS / TCP、AMA の両接続がすべて成立したら LOG-1 の合格を記録します。過去の記録や制限前の到着は合格判定に使いません。到着しなければ15分を目安に待ち、検索期間と0件またはエラーを記録します。LAW 取り込み無効、DCE 公開アクセス無効、AMPLS PrivateOnly、Restricted NSG を維持して③に進みます。
 
-**期待結果**: 対象 VM の Heartbeat と、Source `AmplsArcHandson` / EventID `9001` / 今回の Marker を含む Event が到着します。初回設定の反映に時間がかかる場合があります。15分を本ハンズオンの初回確認の目安として、到着しなければ時刻を記録して[障害調査](troubleshooting.md)へ進んでください。
+<a id="optional-event"></a>
 
-公開取り込み Disabled の状態で判定した結果を記録してから③に進んでください。公開取り込みを有効にして判定すると公開経路の通信を閉域収集と誤認するリスクがあるため、その設定で合格としないでください。
+## 2-9. 任意試験 LOG-1E: Windows イベントを1件送る
+
+DCR の XPath で指定したイベントが収集されることを追加確認する場合に実施します。対象 VM の Bastion セッションで、管理者 Windows PowerShell 5.1 に次を貼り付けます。既存の同名ソースが別ログに属する場合は停止し、ソースがない場合だけ作成します。Application に EventID 9001 を1件書き込みます。
+
+```powershell
+#Requires -Version 5.1
+#Requires -RunAsAdministrator
+$ErrorActionPreference = 'Stop'
+if ($PSVersionTable.PSEdition -ne 'Desktop' -or $PSVersionTable.PSVersion.Major -ne 5 -or
+    $PSVersionTable.PSVersion -lt [version]'5.1') {
+    throw 'Windows PowerShell 5.1 で実行してください。'
+}
+$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$principal = New-Object Security.Principal.WindowsPrincipal($identity)
+if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    throw 'Windows PowerShell を管理者として実行してください。'
+}
+$source = 'AmplsArcHandson'
+if ([Diagnostics.EventLog]::SourceExists($source) -and
+    [Diagnostics.EventLog]::LogNameFromSourceName($source, '.') -ne 'Application') {
+    throw '同名のイベントソースが別のイベントログに属しています。'
+}
+if (-not [Diagnostics.EventLog]::SourceExists($source)) {
+    New-EventLog -LogName Application -Source $source
+}
+$marker = [guid]::NewGuid().ToString()
+$utc = [datetime]::UtcNow.ToString('o')
+Write-EventLog -LogName Application -Source $source -EventId 9001 `
+    -EntryType Information -Message "AmplsArcHandson marker=$marker; utc=$utc"
+[pscustomobject]@{ Marker = $marker; GeneratedUtc = $utc; Computer = $env:COMPUTERNAME; EventId = 9001; Source = $source }
+```
+
+既存の `scripts\Write-HandsonEvent.ps1` と同じ本文・出力形式です。出力された Marker、GeneratedUtc、Computer を保存します。LAW の「ログ」で次を実行し、対象 ID、今回の Marker、今回の生成 UTC 時刻を置き換えます。生成時刻の1分前から29分後までの30分、上限100件で確認します。
+
+```kusto
+let targetResourceId = "<対象 Azure VM の JSON ビューの id>";
+let marker = "<今回出力された Marker>";
+let generatedUtc = todatetime("<今回出力された GeneratedUtc>");
+Event
+| where TimeGenerated between ((generatedUtc - 1m) .. (generatedUtc + 29m))
+| where _ResourceId =~ targetResourceId
+| where Source == "AmplsArcHandson" and EventID == 9001
+| where RenderedDescription contains marker
+| project TimeGenerated, IngestedAt=ingestion_time(), Computer, EventID,
+          Source, RenderedDescription, _ResourceId
+| order by TimeGenerated desc
+| take 100
+```
+
+確認: 今回の Marker を含む対象 VM のイベントが到着したら LOG-1E の合格を記録します。未実施でも LOG-1 の基本試験は実施できます。初回は15分を目安に待ち、0件と検索失敗を区別して記録します。
+
+次の画像は 2026年10月31日 07:23〜07:53 UTC の過去の任意イベント試験の参考です。今回の検証結果を示すものではありません。
+
+![過去の任意イベント試験の KQL](images/02-azure/2-7-02-event-query.png)
+
+![過去の任意イベント試験の結果](images/02-azure/2-7-03-event-result.png)
 
 ## 根拠
 

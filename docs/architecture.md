@@ -16,7 +16,9 @@
 | オンプレミス | Windows Server | Connected Machine agent と AMA を導入する |
 | VNet 外の論理リソース | LAW、DCE、DCR、AMPLS、Arc PLS | データ格納、収集定義、接続範囲を管理する |
 
-LAW は Log Analytics Workspace、DCE は Data Collection Endpoint、DCR は Data Collection Rule の略です。AMPLS と Arc PLS は別のサービスです。DCR は収集するデータと送信先を定義します。Heartbeat は AMA の稼働に伴って収集される情報で、Windows Event の DCR とは別に確認します。
+LAW は Log Analytics Workspace、DCE は Data Collection Endpoint、DCR は Data Collection Rule の略です。AMPLS と Arc PLS は別のサービスです。DCR は収集するデータと送信先を定義します。②は動作確認済みの Application / Source `AmplsArcHandson` / EventID `9001` の XPath と LAW 宛先を持つ DCR を使用します。Heartbeat は AMA の稼働に伴う自動データで、収集元として選択する項目ではありません。Azure VM の基本試験 LOG-1 は新しい Heartbeat、任意試験 LOG-1E は今回生成した Event を確認します。Arc の LOG-2 は Heartbeat と今回生成した Event の両方を必須とします。
+
+②の基本試験は、初回 Heartbeat の確認後に LAW の公開取り込みと DCE の公開アクセスを無効にし、制限反映後の新しい Heartbeat を確認します。既に制限済みの環境は公開アクセスを再び有効にせず、現在の設定を確認した UTC 時刻を基準にします。生成時刻と取り込み時刻の両方が基準時刻より後の記録を使用します。合格には、LAW 取り込み無効、DCE 公開アクセス無効、AMPLS 取り込み PrivateOnly、Restricted NSG、DNS / TCP 成功、AMA 自身の DCE / LAW 接続先がそれぞれ PE の IP、新しい Heartbeat のすべてが必要です。公開クエリは有効を維持し、閲覧には Azure の認証と RBAC 権限を必要とします。
 
 ## 通信を分ける
 

@@ -19,7 +19,7 @@
 切り戻し・残件:
 ```
 
-このハンズオンでは、自分で生成した合成イベントを確認し、Marker と生成時刻を作業記録に残してください。デバイスコードや認証情報を画面キャプチャに含めると第三者に認証を利用されるリスクがあり、業務の実ログ本文を含めると機密情報の漏えいにつながるため、これらを共有資料に記録しないでください。
+Azure VM の基本試験は Heartbeat を使用します。Azure VM の任意試験と Arc の必須試験では、自分で生成した合成イベントの Marker と生成時刻を作業記録に残してください。デバイスコードや認証情報を画面キャプチャに含めると第三者に認証を利用されるリスクがあり、業務の実ログ本文を含めると機密情報の漏えいにつながるため、これらを共有資料に記録しないでください。
 
 ## 2. 名前解決と TCP を確認する
 
@@ -28,7 +28,7 @@ Azure VM とオンプレミス Windows Server の両方で、PE の「DNS の構
 | 番号 | 操作 | 合格条件 |
 |---|---|---|
 | DNS-1 | DCE の構成アクセス FQDN を解決 | AMPLS PE の一覧にある Private IP を返す |
-| DNS-2 | `<Workspace ID>.ods.opinsights.azure.com` を解決 | AMPLS PE の Private IP を返す |
+| DNS-2 | PE の「DNS の構成」からコピーした公開 ODS FQDN `<guid>.ods.opinsights.azure.com` を解決 | AMPLS PE の対応する Private IP を返す |
 | DNS-3 | Arc PE の HIS / Guest Configuration の実 FQDN を解決 | Arc PE の Private IP を返す |
 | DNS-4 | 変更前に記録した既存監視 / Blob の FQDN を解決・利用 | 変更前の正常性を維持 |
 | TCP-1 | 上記の各 IP / FQDN の TCP 443 を検証 | 到達できる |
@@ -44,7 +44,7 @@ Get-NetTCPConnection -State Established |
   Select-Object LocalAddress, RemoteAddress, RemotePort, OwningProcess
 ```
 
-接続が短時間で終了する場合は、生成イベントを送る時刻に合わせて確認します。PID は `Get-Process -Id <PID>` で照合し、AMA と Arc の接続を区別します。ネットワーク追跡を追加する場合は取得範囲の承認を得てください。
+接続が短時間で終了する場合があります。Azure VM は [②の最大5分の AMA 接続観測](02-azure.md#ama-peers)を使用します。PID は `Get-Process -Id <PID>` で実行ファイルと照合し、AMA と Arc の接続を区別します。片方でも接続を取得できなければ、未取得と記録し合格にはしません。ネットワーク追跡を追加する場合は取得範囲の承認を得てください。
 
 ## 3. Heartbeat と新規 Event を確認する
 
@@ -60,7 +60,7 @@ Heartbeat
 | take 100
 ```
 
-対象 Azure VM の ID は `Microsoft.Compute/virtualMachines`、Arc の ID は `Microsoft.HybridCompute/machines` です。Computer と `_ResourceId` の両方を照合してください。Heartbeat で AMA の稼働を確認し、次の Event クエリでイベントの収集結果を確認します。
+対象 Azure VM の ID は VM の「概要 → JSON ビュー」の `id` から取得します。Azure VM は [②の対象 ID で絞った初回 Heartbeat と制限後の KQL](02-azure.md#restricted-check)を使用してください。制限済み環境を公開へ戻さず、現在の設定を確認した UTC 時刻を基準に、`TimeGenerated` と `ingestion_time()` の両方が基準より後の新しい記録を確認します。検索期間は30分、上限100件です。Computer と `_ResourceId` を照合します。Azure VM の Event は任意の LOG-1E、Arc の Event は引き続き必須の LOG-2 です。
 
 [合成イベントのクエリ](../queries/test-events.kql):
 
@@ -78,12 +78,13 @@ Event
 
 | 番号 | 合格条件 |
 |---|---|
-| LOG-1 | Azure VM の Heartbeat と、②で生成した今回の Marker の Event がある |
+| LOG-1 | Azure VM の制限確認後に生成・取り込みされた新しい Heartbeat がある |
+| LOG-1E（任意） | Azure VM の今回の Marker、対象 ID、生成 UTC 時刻の30分範囲で Event がある。[②のイベント生成と KQL](02-azure.md#optional-event)を使用 |
 | LOG-2 | Arc サーバーの Heartbeat と、③で生成した今回の Marker の Event がある |
-| LOG-3 | LAW の公開取り込み Disabled、AMPLS の取り込み PrivateOnly のまま LOG-1 / LOG-2 が成功 |
-| LOG-4 | DCE の設定取得先と LAW の実接続先がそれぞれ PE の IP である |
+| LOG-3 | LAW の公開取り込み Disabled、DCE の公開アクセス Disabled、AMPLS の取り込み PrivateOnly、ラボの Restricted NSG を維持したまま LOG-1 / LOG-2 が成功 |
+| LOG-4 | PID と AMA の実行ファイルを照合し、設定取得の DCE とログ送信の LAW の実接続先がそれぞれ対応する PE の IP である |
 
-ログの到着、DNS 応答、接続先 IP、公開取り込みの設定値を併せて閉域収集を判定してください。
+閉域収集は、新しいログの到着、DNS 応答、TCP 成功、AMA 自身の両接続先 IP、DCE / LAW / AMPLS の制限、Restricted NSG のすべてで判定してください。初回は15分を目安に待ち、過去の記録を再表示した結果だけで合格にしません。公開クエリは有効を維持し、閲覧には Azure の認証と RBAC 権限が必要です。
 
 ## 4. Arc の Private Link と Proxy を確認する
 
