@@ -144,9 +144,15 @@
 操作場所は Azure Portal です。①の環境は Firewall Standard を使います。
 
 1. 上部の検索で「ファイアウォール」を開き、対象 Firewall →「概要」でプライベート IP を確認します。関連付けられた Firewall Policy のリンクを開きます。
+
+   ![Firewall の概要にあるプライベート IP 10.20.0.4 と関連する Firewall Policy のリンク](images/03-onpremises/3-3-01-firewall-overview.png)
+
 2. Policy の「Explicit Proxy / 明示的なプロキシ」を開き、有効にします。HTTP 待受ポートには使用可能な任意のポート番号を指定します。本ハンズオンは例として `3128` を使い、以降の接続許可と Proxy URL もこの番号で統一します。HTTP と HTTPS は同じ待受ポートを使います。
 
    Azure Arc の Agent に直接 Proxy URL を指定するため、Proxy PAC は利用しません。「プロキシの自動構成を有効にする」はチェックせず、「保存」を押します。
+
+   ![Explicit Proxy を有効にし、HTTP ポートを3128、Proxy の自動構成を無効にした入力画面](images/03-onpremises/3-3-02-explicit-proxy.png)
+
 3. Policy の「規則コレクション」から「規則コレクションの追加」を開き、次を入力して「追加」を押します。①の専用ハンズオン環境向けの例です。共有環境では既存の優先度と許可先に合わせ、ソースは対象サーバーの送信元 IP（NAT がある場合は変換後の IP）に限定してください。
 
    | 規則コレクションの項目 | 入力例 |
@@ -161,16 +167,26 @@
 
    | 規則名 | 対象 FQDN |
    |---|---|
-   | `arc-auth` | `login.microsoftonline.com`、`*.login.microsoft.com`、`pas.windows.net` |
+   | `arc-auth` | `login.microsoftonline.com`,`*.login.microsoft.com`,`pas.windows.net` |
    | `arc-arm` | `management.azure.com` |
-   | `arc-notifications` | `guestnotificationservice.azure.com`、`*.guestnotificationservice.azure.com`、`*.servicebus.windows.net` |
-   | `arc-download` | `aka.ms`、`download.microsoft.com`、`gbl.his.arc.azure.com` |
+   | `arc-notifications` | `guestnotificationservice.azure.com`,`*.guestnotificationservice.azure.com`,`*.servicebus.windows.net` |
+   | `arc-download` | `aka.ms`,`download.microsoft.com`,`gbl.his.arc.azure.com` |
+
+   ![規則コレクション arc-public-outbound と4件の Application 規則の入力画面](images/03-onpremises/3-3-03-application-rules.png)
 
    これは [Arc の公式ネットワーク要件](https://learn.microsoft.com/azure/azure-arc/servers/network-requirements#urls)に基づく例です。ダウンロードの転送先や導入する拡張機能に追加の宛先が必要な場合は、失敗した接続先を確認して追加します。Arc の HIS / Guest Configuration と AMA の送信先は PE に直接接続するため、この Proxy 規則には追加しません。
 4. Policy の「DNS」を開き、「DNS サーバー」でカスタムを選び、Resolver Inbound IP（例 `10.20.2.4`）を入力して「保存」を押します。DNS Proxy は、このハンズオンでは①の設定を維持します。対象サーバーの DNS は [3-2 の Windows DNS](#windows-dns)を使います。
+
+   ![Firewall Policy のカスタム DNS に 10.20.2.4 を指定し、DNS Proxy を無効にした入力画面](images/03-onpremises/3-3-04-firewall-dns.png)
+
 5. Premium を使う場合は、追加した Application 規則を開き、「TLS 検査」をチェックせず保存します。Arc 用の通信は証明書を置き換えません。①の Standard には TLS 検査の設定がないため、この操作は不要です。共有 Policy の TLS 検査全体は変更しません。
 6. Firewall 本体の「診断設定 → 診断設定を追加」を開き、Application rule のログを選択します。「Log Analytics ワークスペースに送信する」で②の LAW を指定し、宛先テーブルに「リソース固有」を選んで保存します。ログは `AZFWApplicationRule` に入ります。既に同じ設定があれば追加不要です。診断ログの取り込み費用が発生します。
-7. Arc を導入するサーバーの Windows PowerShell で次を実行します。
+
+   次の画像では `allLogs` と「Azure Diagnostics」が選択されています。本手順の後半の KQL は「リソース固有」の `AZFWApplicationRule` を使うため、同じ KQL を使う場合は「リソース固有」を選んで保存してください。「Azure Diagnostics」を維持する場合は `AzureDiagnostics` テーブル用の KQL が必要です。本手順の `AZFWApplicationRule` 用 KQL はそのまま使えません。
+
+   ![Firewall の診断設定で LAW を指定した画面。allLogs と Azure Diagnostics が選択されている状態](images/03-onpremises/3-3-06-firewall-diagnostics.png)
+
+7. ここまでで設定した Azure Firewall をプロキシとして使い、Arc を導入するサーバーから HTTPS 通信ができることを確認します。対象サーバーの Windows PowerShell で次を実行します。
 
    ```powershell
    $proxyIp = '10.20.0.4'
@@ -183,13 +199,13 @@
    $response.StatusCode
    ```
 
+   ![Azure Firewall をプロキシとして指定した HTTPS 要求の結果が HTTP 200 の画面](images/03-onpremises/3-3-07-proxy-http-result.png)
+
 確認: `TcpTestSucceeded` が `True`、HTTP ステータスが `200` です。これは Proxy 経由の HTTPS 疎通確認であり、Arc の認証確認は次の登録操作で行います。
 
 <a id="arc-onboarding"></a>
 
 ## 3-4. Azure Portal から Arc に登録する
-
-オンプレミスにある Azure Arc 導入対象のサーバーで、管理者 Windows PowerShell 5.1（64ビット）を起動して操作します。①では L2 ゲストを使います。リポジトリ独自の導入・登録スクリプトは使いません。
 
 1. 管理端末の Azure Portal で「Azure Arc」を検索し、「インフラストラクチャ → マシン → オンボード / 作成 → 既存マシンのオンボード」を開きます。
 2. 「基本」で次を指定します。
@@ -204,46 +220,93 @@
    | Proxy サーバー URL | `http://10.20.0.4:3128` |
    | 認証 | マシンを手動で認証 |
 
+   ![Arc オンボードの基本設定。RG、Japan East、Windows を指定し、Connect SQL Server のチェックを外した画面](images/03-onpremises/3-4-02-onboarding-basics.png)
+
+   ![Private endpoint、Arc PLS、Proxy URL と手動認証を選択した画面](images/03-onpremises/3-4-03-onboarding-connectivity.png)
+
 3. 「次へ」で「タグ」を開き、`ArcSQLServerExtensionDeployment` = `Disabled` を追加します。本ハンズオンでは SQL Server 拡張機能を自動導入しません。
 4. 「次へ → スクリプトのダウンロードと実行」で作成先と接続方法を確認し、「ダウンロード」を押します。Microsoft が生成する `OnboardingScript.ps1` を対象サーバーの任意の作業フォルダー（例 `C:\ArcOnboarding`）へ配置します。①でも L1 ではなく L2 へ配置してください。
-5. ダウンロードしたファイルをエディターで開きます。生成ファイルの Proxy 設定を次のようにそろえます。
 
-   - `SetEnvironmentVariable` を検索します。`HTTPS_PROXY` を `Machine` に保存する行があれば削除します。本ハンズオンではマシン全体の Proxy と既存のサービス設定を変更しません。
-   - ダウンロード処理より前に次の1行を追加します。この値は実行中の PowerShell とその子プロセスだけに適用します。生成ファイルがインストーラーへ渡す `-Proxy` の値も、Portal に入力した同じ URL とします。
+   ![Portal が生成した公式オンボードスクリプトと Download ボタン](images/03-onpremises/3-4-04-onboarding-download.png)
+
+5. ダウンロードした `OnboardingScript.ps1` をエディターで開き、次の3箇所を確認・編集します。2026年11月4日に Portal で生成したファイルを例にしています。
+
+   - **マシン全体の Proxy 設定**: `SetEnvironmentVariable` を検索します。該当する行がないことを確認します。万一、ファイルに `HTTPS_PROXY` を `Machine` に保存する行がある場合は、その行を削除します。既存の OS の Proxy 設定を変更しないためです。
+   - **ダウンロードとインストール**: `# Download the installation package` と `# Install the hybrid agent` を検索します。それぞれの直後のコマンドに、次のように `-proxy "http://10.20.0.4:3128"` が付いていれば変更不要です。
 
      ```powershell
-     $env:HTTPS_PROXY = 'http://10.20.0.4:3128'
+     # Download the installation package
+     Invoke-WebRequest -UseBasicParsing -Uri "https://gbl.his.arc.azure.com/azcmagent-windows" -TimeoutSec 30 -OutFile "$installScriptPath" -proxy "http://10.20.0.4:3128";
+
+     # Install the hybrid agent
+     & "$installScriptPath" -proxy "http://10.20.0.4:3128";
      ```
 
-   - `--resource-group` と `--tenant-id` を指定する Agent の `connect` 呼び出しを探します。インストール処理が完了した後、この呼び出しの直前に次を追加します。複数行のコマンドの途中には入れません。既に同じ設定がある場合は追加不要です。
+   - **登録後も使う Arc Agent の Proxy 設定**: ダウンロード・インストールの `-proxy` だけでは、稼働する Agent の通信経路を設定したことにはなりません。`proxy.url` は認証・ARM 等の公開通信に Firewall のプロキシを使う設定、`proxy.bypass=Arc` は HIS / Guest Configuration に PE へ直接接続する設定です。直接インターネットへ接続できる環境では追加せずに動く場合もありますが、本ハンズオンの通信経路には両設定が必要です。既に同じ Agent 設定がある場合は追加不要です。
 
-   ```powershell
-   $arc = "$env:ProgramFiles\AzureConnectedMachineAgent\azcmagent.exe"
-   & $arc config set proxy.url 'http://10.20.0.4:3128'
-   if ($LASTEXITCODE -ne 0) { throw 'Arc Proxy の設定に失敗しました。' }
-   & $arc config set proxy.bypass 'Arc'
-   if ($LASTEXITCODE -ne 0) { throw 'Arc Proxy bypass の設定に失敗しました。' }
-   ```
+     `# Run connect command` を検索し、その直前の `Start-Sleep -Seconds 5;` との間に次を追加します。画像では59行目の待機処理の後、60行目以降が追加位置です。行番号は生成ファイルによって異なるため、コメントを目印にします。元の `connect` コマンドは変更せず残してください。
 
-   `Arc` の指定で HIS / Guest Configuration は PE に直接接続し、認証・ARM 等は Proxy を使います。この指定は [公式の Agent 固有 Proxy 設定](https://learn.microsoft.com/azure/azure-arc/servers/manage-agent-proxy-settings#proxy-bypass-for-private-endpoints)です。独自の登録スクリプトを作らず、公式の生成ファイルに本ハンズオンで必要な設定だけを追加します。
-6. 対象サーバーの管理者 Windows PowerShell で、ファイルの配置先へ移動して実行します。
+     ![追加前の公式スクリプト。59行目の待機処理と61行目の Run connect command の間が追加位置](images/03-onpremises/3-4-05-proxy-before.png)
+
+     ```powershell
+     Start-Sleep -Seconds 5;
+
+     $arc = "$env:ProgramW6432\AzureConnectedMachineAgent\azcmagent.exe"
+     & $arc config set proxy.url 'http://10.20.0.4:3128'
+     if ($LASTEXITCODE -ne 0) { throw 'Arc proxy setup failed.' }
+     & $arc config set proxy.bypass 'Arc'
+     if ($LASTEXITCODE -ne 0) { throw 'Arc proxy bypass setup failed.' }
+
+     # Run connect command
+     ```
+
+     ![追加後の公式スクリプト。待機処理と connect 呼び出しの間に Proxy URL と bypass Arc を設定](images/03-onpremises/3-4-06-proxy-after.png)
+
+   - **デバイス登録コードでの登録**: スクリプトそのままでは、Agent は直接インターネット疎通による登録を試みます。ハンズオンの環境は、インターネット疎通ができないため、デバイスコード認証で登録するようにスクリプトを修正します。azcmagent.exe ... connect の行に、--use-device-code を追加する必要があります。デバイスコード認証が不可能な場合には、[公式の別認証方法](https://learn.microsoft.com/azure/azure-arc/servers/azcmagent-connect)を確認してください。
+
+
+6. 対象サーバーの管理者 Windows PowerShell で、ファイルの配置先へ移動して実行します。公式スクリプトが Agent のダウンロード、インストール、Arc 登録を行います。5. でデバイスコード認証を行うよう スクリプトの修正を行っているため、画面に表示された認証 URL を、別のインターネット疎通可能な管理端末で開き、表示されたコードで認証します。
 
    ```powershell
    Set-Location 'C:\ArcOnboarding'
    .\OnboardingScript.ps1
    ```
 
-   公式スクリプトが Agent のダウンロード、インストール、Arc 登録を行います。画面に表示された認証 URL を管理端末で開き、表示されたコードで認証します。コード・トークン・認証画面は記録や画像に含めません。デバイスコード認証が禁止されている場合は、[公式の別認証方法](https://learn.microsoft.com/azure/azure-arc/servers/azcmagent-connect)を選びます。登録と手順8の確認が終わったら、この PowerShell を閉じてセッション限定の Proxy を終了します。
-7. Portal の「Azure Arc → インフラストラクチャ → マシン」を開き、登録したサーバーの状態が `Connected` であることを確認します。対象を開いて作成先とリージョンを確認し、「概要 → JSON ビュー」の `id` を控えます。KQL に使うのはこの Arc リソース ID です。①の L1 の VM ID とは異なります。
+   ![管理端末のブラウザーでデバイスコードを入力する画面。認証コードは非表示](images/03-onpremises/3-4-07-device-code-masked.png)
+
+   ![公式スクリプトの実行結果で Azure への接続成功が表示された画面。認証コードの行は非表示](images/03-onpremises/3-4-08-arc-connected.png)
+
+7. Portal の「Azure Arc → インフラストラクチャ → マシン」を開き、登録したサーバーの状態が `Connected` であることを確認します。対象を開いて作成先とリージョンを確認し、「概要 → JSON ビュー」の `id` を控えます。KQL に使うのはこの Arc リソース ID です。
+
+   ![Azure Arc のマシン一覧で ArcOnpremL2 が Connected の状態](images/03-onpremises/3-4-09-arc-portal-connected.png)
+
 8. 対象サーバーの管理者 Windows PowerShell で次を実行します。
 
    ```powershell
    $arc = "$env:ProgramFiles\AzureConnectedMachineAgent\azcmagent.exe"
    & $arc show
-   if ($LASTEXITCODE -ne 0) { throw 'Arc の状態取得に失敗しました。' }
+   if ($LASTEXITCODE -ne 0) { throw 'Arc status check failed.' }
    & $arc check --location japaneast --enable-pls-check
-   if ($LASTEXITCODE -ne 0) { throw 'Arc のネットワークチェックに失敗しました。' }
+   if ($LASTEXITCODE -ne 0) { throw 'Arc network check failed.' }
    ```
+
+   `azcmagent check` の実行結果例です。
+
+   ```text
+   PS C:\Users\Administrator>    & $arc check --location japaneast --enable-pls-check
+   INFO    クラウド: AzureCloud
+   INFO    Azure への接続に必要なエンドポイントへの接続をテストしています...これには数分かかる場合があります。
+   ユース ケース  |エンドポイント                                               |到達可能  |プライベート   |TLS      |プロキシ
+   core     |https://agentserviceapi.guestconfiguration.azure.com  |true  |true     |TLS 1.3  |bypassed
+   core     |https://gbl.his.arc.azure.com                         |true  |true     |TLS 1.2  |bypassed
+   core     |https://japaneast-gas.guestconfiguration.azure.com    |true  |true     |TLS 1.3  |bypassed
+   core     |https://je.his.arc.azure.com                          |true  |true     |TLS 1.2  |bypassed
+   core     |https://login.microsoftonline.com                     |true  |unknown  |TLS 1.3  |set
+   core     |https://management.azure.com                          |true  |unknown  |TLS 1.3  |set
+   core     |https://pas.windows.net                               |true  |unknown  |TLS 1.3  |set
+   ```
+
+   この例では、HIS / Guest Configuration は「到達可能」と「プライベート」が `true`、プロキシが `bypassed` です。認証・ARM 等の公開宛先は「到達可能」が `true`、プロキシが `set` です。公開宛先の「プライベート」欄の `unknown` を、到達失敗とは扱いません。
 
 確認: 有効な Proxy URL が指定どおりで、bypass が `Arc` です。ネットワークチェックでは HIS / Guest Configuration が Private Endpoint を使い、認証・ARM 等の必須チェックも成功します。
 
@@ -273,17 +336,17 @@
    if ($PSVersionTable.PSEdition -ne 'Desktop' -or
        $PSVersionTable.PSVersion.Major -ne 5 -or
        $PSVersionTable.PSVersion -lt [version]'5.1') {
-       throw '管理者 Windows PowerShell 5.1 で実行してください。'
+       throw 'Use Windows PowerShell 5.1 as Administrator.'
    }
    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
    if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-       throw 'Windows PowerShell を管理者として実行してください。'
+       throw 'Run Windows PowerShell as Administrator.'
    }
    $source = 'AmplsArcHandson'
    if ([Diagnostics.EventLog]::SourceExists($source) -and
        [Diagnostics.EventLog]::LogNameFromSourceName($source, '.') -ne 'Application') {
-       throw '同名のイベントソースが別のログに属しています。'
+       throw 'The event source belongs to another log.'
    }
    if (-not [Diagnostics.EventLog]::SourceExists($source)) {
        New-EventLog -LogName Application -Source $source
@@ -363,12 +426,12 @@ AZFWApplicationRule
 Arc サーバーと DCE の「概要 → JSON ビュー」の `id` をコピーします。Portal で設定取得用 DCE を関連付けられない場合は、[公式 CLI コマンド](https://learn.microsoft.com/azure/azure-monitor/fundamentals/private-link-vm-kubernetes#associate-vmcluster-with-dce)を実行します。DCE の「リソース」と既存の関連付けを確認し、別の DCE が関連付いている場合は置き換えず管理者と調整してください。
 
 ```powershell
-$subscriptionId = '<承認した Subscription ID>'
-$arcId = '<Arc サーバーの JSON ビューの id>'
-$dceId = '<DCE の JSON ビューの id>'
+$subscriptionId = '<Subscription ID>'
+$arcId = '<Arc resource ID>'
+$dceId = '<DCE resource ID>'
 az monitor data-collection rule association list `
     --resource $arcId --subscription $subscriptionId
-if ($LASTEXITCODE -ne 0) { throw '既存の関連付け取得に失敗しました。' }
+if ($LASTEXITCODE -ne 0) { throw 'Association lookup failed.' }
 ```
 
 表示された `dataCollectionEndpointId` が空で、新たに関連付ける場合だけ次を実行します。同じ DCE の関連付けがあれば追加不要です。
@@ -378,22 +441,22 @@ az monitor data-collection rule association create `
     --association-name configurationAccessEndpoint `
     --data-collection-endpoint-id $dceId --resource-uri $arcId `
     --subscription $subscriptionId
-if ($LASTEXITCODE -ne 0) { throw 'DCE の関連付けに失敗しました。' }
+if ($LASTEXITCODE -ne 0) { throw 'DCE association failed.' }
 ```
 
 AMA の直接接続を明示設定する場合は、次を実行します。[公式拡張機能 CLI](https://learn.microsoft.com/cli/azure/connectedmachine/extension#az-connectedmachine-extension-update)で既存 settings を取得し、proxy だけを `none` に変えます。CLI の拡張機能が不足する場合は、公式コマンドページのインストール手順に従って準備してください。
 
 ```powershell
-$subscriptionId = '<承認した Subscription ID>'
-$resourceGroup = '<Arc サーバーの RG>'
-$machineName = '<Portal にある Arc サーバー名>'
+$subscriptionId = '<Subscription ID>'
+$resourceGroup = '<Arc resource group>'
+$machineName = '<Arc machine name>'
 $raw = az connectedmachine extension show --name AzureMonitorWindowsAgent `
     --machine-name $machineName --resource-group $resourceGroup `
     --subscription $subscriptionId --output json
-if ($LASTEXITCODE -ne 0) { throw 'AMA の設定取得に失敗しました。' }
+if ($LASTEXITCODE -ne 0) { throw 'AMA settings lookup failed.' }
 $extension = ($raw -join "`n") | ConvertFrom-Json -AsHashtable
 if ($extension.publisher -ne 'Microsoft.Azure.Monitor') {
-    throw '対象の拡張機能は AMA ではありません。'
+    throw 'The extension is not AMA.'
 }
 $settings = $extension.settings
 if ($null -eq $settings) { $settings = @{} }
@@ -405,7 +468,7 @@ try {
     az connectedmachine extension update --name AzureMonitorWindowsAgent `
         --machine-name $machineName --resource-group $resourceGroup `
         --subscription $subscriptionId --settings ('@' + $file.FullName)
-    if ($LASTEXITCODE -ne 0) { throw 'AMA の Proxy 設定に失敗しました。' }
+    if ($LASTEXITCODE -ne 0) { throw 'AMA proxy setup failed.' }
 } finally {
     Remove-Item -LiteralPath $file.FullName
 }
