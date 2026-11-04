@@ -315,21 +315,39 @@
 ## 3-5. AMA と DCR / DCE を関連付けてログを確認する
 
 1. Portal で「監視」を検索し、「設定 → データ収集ルール」から②の `dcr-arclab-windows` を開きます。「リソース → 追加」で登録した Arc サーバーを選び、「適用」を押します。Portal が AMA を導入します。
-2. Arc サーバーの「拡張機能」で `AzureMonitorWindowsAgent` のプロビジョニング状態が `Succeeded` になるまで待ちます。
-3. 「監視 → 設定 → データ収集エンドポイント」から②の `dce-arclab` を開き、「リソース → 追加」で同じ Arc サーバーを選びます。DCR にも DCE にも対象があることを確認します。DCE は AMA の設定取得先です。
-4. AMA の拡張機能の「JSON ビュー」で settings の proxy を確認します。`mode=none` に設定済みなら次へ進みます。別の Proxy 設定がある場合や直接接続を確認できない場合は、後述の[管理端末の補助操作](#management-commands)で `none` にします。
-5. 閉域収集を判定する前に、②の LAW の公開取り込みが無効、DCE の公開アクセスが無効、AMPLS の取り込みモードが `Private Only` であることを確認します。①のラボは既存の Restricted NSG を維持します。実オンプレミスでは管理者が対象サーバーの公開直接通信を制限し、Windows DNS、PE、Proxy と管理接続を許可した状態で試験します。
 
-   対象サーバーで次を実行します。直接接続は `False`、Proxy 待受ポートへの接続は `True` が期待結果です。
+   ![Arc サーバーの追加前の DCR リソース一覧](images/03-onpremises/3-5-01-dcr-before.png)
+
+   ![DCR の追加対象に ArcOnpremL2 を選択した画面](images/03-onpremises/3-5-02-dcr-select-arc.png)
+
+   ![DCR の関連付け完了通知と ArcOnpremL2 が追加された一覧。データフローの状態は確認中](images/03-onpremises/3-5-03-dcr-associated.png)
+
+2. Arc サーバーの「拡張機能」で `AzureMonitorWindowsAgent` のプロビジョニング状態が `Succeeded` になるまで待ちます。
+
+   ![Arc サーバーの拡張機能で AMA が作成中の状態](images/03-onpremises/3-5-04-ama-installing.png)
+
+   ![Arc サーバーの拡張機能で AMA の状態が成功になった画面](images/03-onpremises/3-5-05-ama-succeeded.png)
+
+3. 「監視 → 設定 → データ収集エンドポイント」から②の `dce-arclab` を開き、「リソース → 追加」で同じ Arc サーバーを選びます。DCR にも DCE にも対象があることを確認します。DCE は AMA の設定取得先です。
+
+   ![Arc サーバーの追加前の DCE リソース一覧](images/03-onpremises/3-5-06-dce-before.png)
+
+   ![DCE の追加対象に ArcOnpremL2 を選択した画面](images/03-onpremises/3-5-07-dce-select-arc.png)
+
+   ![DCE のリソース一覧に ArcOnpremL2 が関連付けられた画面](images/03-onpremises/3-5-08-dce-associated.png)
+
+4. 閉域での収集を確認する前に、②の LAW の公開取り込みが無効、DCE の公開アクセスが無効、AMPLS の取り込みモードが `Private Only` であることを確認します。
+Arc 対象サーバーで次を実行します。直接接続(Public 接続)は `False`、Proxy 待受ポートへの接続(Proxy 経由)は `True` が期待結果です。
 
    ```powershell
    Test-NetConnection management.azure.com -Port 443
    Test-NetConnection '10.20.0.4' -Port 3128
-   [datetime]::UtcNow.ToString('o')
    ```
 
-   出力した UTC 時刻を基準時刻として控えます。既に制限済みの環境も公開アクセスを戻しません。
-6. 対象サーバーの管理者 Windows PowerShell 5.1 で、次を1回実行します。Application に検証イベントを1件書き込みます。
+   ![L2 から公開宛先への直接 TCP 接続は False、Firewall の Proxy ポートへの TCP 接続は True の実行結果](images/03-onpremises/3-5-09-direct-and-proxy-test.png)
+
+5. 対象サーバーの管理者 Windows PowerShell で、次を1回実行します。Application に検証イベントを1件書き込みます。
+EventViewer で [Windows Logs -> Application ] に EventID 9001 のログが記録されます。
 
    ```powershell
    $ErrorActionPreference = 'Stop'
@@ -364,22 +382,24 @@
    }
    ```
 
-7. Portal の②の LAW →「ログ」を開き、「KQL モード」で次を実行します。表示上限は「表示 → カスタム → 100」にします。Arc の JSON ビューで取得した `id` と、手順5の基準 UTC 時刻を貼り付けます。
+   ![Application に検証イベントを1件生成し、Marker と生成 UTC 時刻を出力した画面](images/03-onpremises/3-5-10-event-created.png)
+
+   ![イベント ビューアーの Application にある Source AmplsArcHandson、EventID 9001 と今回の Marker](images/03-onpremises/3-5-11-event-viewer.png)
+
+6. Portal の②の LAW →「ログ」を開き、「KQL モード」で次を実行します。表示上限は「表示 → カスタム → 100」にします。Arc の JSON ビューで取得した `id` を貼り付け、直近15分の Heartbeat を確認します。
 
    ```kusto
    let targetResourceId = "<Arc サーバーの JSON ビューの id>";
-   let restrictedSince = todatetime("<手順5で控えた UTC 時刻>");
    Heartbeat
-   | where TimeGenerated > ago(30m)
+   | where TimeGenerated > ago(15m)
    | where _ResourceId =~ targetResourceId
    | where Category == "Azure Monitor Agent"
-   | where TimeGenerated > restrictedSince and ingestion_time() > restrictedSince
    | project TimeGenerated, IngestedAt=ingestion_time(), Computer, _ResourceId
    | order by TimeGenerated desc
    | take 100
    ```
 
-8. 同じ画面で、今回のイベントの Marker と GeneratedUtc を貼り付けて実行します。検索期間は生成時刻の1分前から29分後までの30分、上限100件です。
+7. 同じ画面で、今回のイベントの Marker と GeneratedUtc を貼り付けて実行します。検索期間は生成時刻の1分前から29分後までの30分、上限100件です。
 
    ```kusto
    let targetResourceId = "<Arc サーバーの JSON ビューの id>";
@@ -396,19 +416,18 @@
    | take 100
    ```
 
-確認: 制限確認後の Heartbeat と今回の Marker の Event が対象 Arc サーバーから到着します。初回は15分を目安に待ちます。0件の場合は検索期間と結果を記録し、検索エラーの場合はエラーを記録して[障害調査](troubleshooting.md)へ進みます。
+確認: 最新の Heartbeat と今回の Marker の Event が対象 Arc サーバーから到着します。Heartbeat の生成時刻と取り込み時刻も確認します。初回は15分を目安に待ちます。0件の場合は検索期間と結果を記録し、検索エラーの場合はエラーを記録して[障害調査](troubleshooting.md)へ進みます。途中で公開アクセスや通信制限を変更した場合は、変更後に生成・取り込みされたログで確認します。
 
 閉域経路の合格には、[3-2 の DNS / TCP](#windows-dns)、[Arc のチェック](#arc-onboarding)、[②と同じ AMA の実接続確認](02-azure.md#ama-peers)も必要です。AMA の PID と実行ファイルを照合し、DCE と LAW の両接続先が AMPLS PE の対応する IP であることを確認します。接続を取得できなければ未取得として記録し、ログの到着だけで閉域経路の合格にはしません。①②の Azure VM と③の Arc サーバーの結果は、それぞれのリソース ID で区別します。
 
 ### Proxy を通った公開通信の確認
 
-Firewall の診断設定で指定した LAW の「ログ」で次を実行します。①の L2 は WinNAT を通るため、Firewall が観測する送信元は L1 の `10.30.1.4` です。規則のソースを `*` にしていても、検索は対象送信元と実施時刻に絞ります。
+Firewall の診断設定で指定した LAW の「ログ」で次を実行します。①の L2 は WinNAT を通るため、Firewall が観測する送信元は L1 の `10.30.1.4` です。規則のソースを `*` にしていても、検索は対象送信元と直近30分に絞ります。
 
 ```kusto
 let sourceIp = "10.30.1.4";
-let startedUtc = todatetime("<手順5で控えた UTC 時刻>");
 AZFWApplicationRule
-| where TimeGenerated between (startedUtc .. (startedUtc + 30m))
+| where TimeGenerated > ago(30m)
 | where SourceIp == sourceIp
 | project TimeGenerated, SourceIp, Fqdn, Action, Protocol
 | order by TimeGenerated desc
@@ -416,65 +435,6 @@ AZFWApplicationRule
 ```
 
 確認: Arc の認証先・管理先への Allow を確認します。
-
-<a id="management-commands"></a>
-
-### 必要な場合だけ使う管理端末の補助操作
-
-対象サーバー内では実行しません。管理端末の PowerShell 7 と、[Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli)を使います。実施環境の認証手順で対象テナントへサインインし、`az account show` の `tenantId`、`id`（Subscription ID）、`user`（実行 ID と認証種別）を今回の作業先と照合します。
-
-Arc サーバーと DCE の「概要 → JSON ビュー」の `id` をコピーします。Portal で設定取得用 DCE を関連付けられない場合は、[公式 CLI コマンド](https://learn.microsoft.com/azure/azure-monitor/fundamentals/private-link-vm-kubernetes#associate-vmcluster-with-dce)を実行します。DCE の「リソース」と既存の関連付けを確認し、別の DCE が関連付いている場合は置き換えず管理者と調整してください。
-
-```powershell
-$subscriptionId = '<Subscription ID>'
-$arcId = '<Arc resource ID>'
-$dceId = '<DCE resource ID>'
-az monitor data-collection rule association list `
-    --resource $arcId --subscription $subscriptionId
-if ($LASTEXITCODE -ne 0) { throw 'Association lookup failed.' }
-```
-
-表示された `dataCollectionEndpointId` が空で、新たに関連付ける場合だけ次を実行します。同じ DCE の関連付けがあれば追加不要です。
-
-```powershell
-az monitor data-collection rule association create `
-    --association-name configurationAccessEndpoint `
-    --data-collection-endpoint-id $dceId --resource-uri $arcId `
-    --subscription $subscriptionId
-if ($LASTEXITCODE -ne 0) { throw 'DCE association failed.' }
-```
-
-AMA の直接接続を明示設定する場合は、次を実行します。[公式拡張機能 CLI](https://learn.microsoft.com/cli/azure/connectedmachine/extension#az-connectedmachine-extension-update)で既存 settings を取得し、proxy だけを `none` に変えます。CLI の拡張機能が不足する場合は、公式コマンドページのインストール手順に従って準備してください。
-
-```powershell
-$subscriptionId = '<Subscription ID>'
-$resourceGroup = '<Arc resource group>'
-$machineName = '<Arc machine name>'
-$raw = az connectedmachine extension show --name AzureMonitorWindowsAgent `
-    --machine-name $machineName --resource-group $resourceGroup `
-    --subscription $subscriptionId --output json
-if ($LASTEXITCODE -ne 0) { throw 'AMA settings lookup failed.' }
-$extension = ($raw -join "`n") | ConvertFrom-Json -AsHashtable
-if ($extension.publisher -ne 'Microsoft.Azure.Monitor') {
-    throw 'The extension is not AMA.'
-}
-$settings = $extension.settings
-if ($null -eq $settings) { $settings = @{} }
-$settings['proxy'] = @{ mode = 'none' }
-$file = New-TemporaryFile
-try {
-    $settings | ConvertTo-Json -Depth 30 |
-        Set-Content -LiteralPath $file.FullName -Encoding utf8NoBOM
-    az connectedmachine extension update --name AzureMonitorWindowsAgent `
-        --machine-name $machineName --resource-group $resourceGroup `
-        --subscription $subscriptionId --settings ('@' + $file.FullName)
-    if ($LASTEXITCODE -ne 0) { throw 'AMA proxy setup failed.' }
-} finally {
-    Remove-Item -LiteralPath $file.FullName
-}
-```
-
-操作後は Portal の拡張機能で `Succeeded` と `settings.proxy.mode=none` を確認します。AMA の配布失敗と稼働通信は分けて扱い、配布先を許可する場合も対象と期間を限定してください。
 
 ## 根拠
 
