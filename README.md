@@ -44,7 +44,7 @@ Azure Monitor Private Link と Azure Arc Private Link を使用し、Azure VM �
 - 本編では Azure リソースの作成・変更と課金が発生します。予算、通貨、有効期限、削除担当を決め、実施環境の費用見積もりと変更承認を取得してください。
 - 初回導入ファイルの取得、稼働中の Agent 通信、更新時の通信を別々に確認してください。インストーラーの取得にはダウンロード処理の Proxy 指定、導入後の Arc 通信には Agent 固有の Proxy 設定を使用します。
 - ①の講師用ラボでは hub の Azure Bastion Standard から各 Azure VM を操作します。L2 は L1 の VMConnect / PowerShell Direct 経由で操作してください。Bastion と専用 Public IP の費用も予算に含めます。
-- ①の構築中は3台それぞれの PIP で外向き通信を行い、[公式 ISO から L2 を自動構築](docs/iso-build.md)します。①の最後に各 NIC の NSG を Restricted に切り替え、②③は直接の Internet 通信を遮断した状態で実施します。PIP は関連付けたまま維持し、NSG で通信を制御してください。
+- ①の構築中は3台それぞれの PIP で外向き通信を行い、公式 ISO から L2 を自動構築します。①の最後に各 NIC の NSG を Restricted に切り替え、②③は直接の Internet 通信を遮断した状態で実施します。PIP は関連付けたまま維持し、NSG で通信を制御してください。
 
 ## 免責
 - Hands-on の作成日は `2026-10-27` です。

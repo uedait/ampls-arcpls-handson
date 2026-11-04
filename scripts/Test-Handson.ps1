@@ -12,10 +12,10 @@ $scriptCount = 0
 $linkCount = 0
 $fencedCodePattern = '(?ms)^[ \t]*(`{3,}|~{3,})[^\r\n]*\r?\n.*?^[ \t]*\1[ \t]*\r?$'
 foreach ($newline in @("`n", "`r`n")) {
-    $sample = @('```powershell', '[uri](Read-Host)', '```', '[guide](docs/iso-build.md)') -join $newline
+    $sample = @('```powershell', '[uri](Read-Host)', '```', '[guide](docs/90-architecture.md)') -join $newline
     $sampleContent = [regex]::Replace($sample, $fencedCodePattern, '')
     $sampleLinks = [regex]::Matches($sampleContent, '\]\(([^)\r\n]+)\)')
-    if ($sampleLinks.Count -ne 1 -or $sampleLinks[0].Groups[1].Value -ne 'docs/iso-build.md') {
+    if ($sampleLinks.Count -ne 1 -or $sampleLinks[0].Groups[1].Value -ne 'docs/90-architecture.md') {
         throw 'Markdown fence/link regression check failed.'
     }
 }
