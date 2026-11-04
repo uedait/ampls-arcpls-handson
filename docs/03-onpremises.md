@@ -91,7 +91,7 @@
 
 ## 3-2. Windows DNS に条件付きフォワーダーを追加する
 
-操作場所は既存 Windows DNS サーバーの「DNS マネージャー」です。AD 統合 DNS の設定は複製先にも適用されます。既存基盤では同名のゾーン・フォワーダーを上書きせず、保存・複製範囲を管理者の運用方針に合わせます。新規の専用ラボでは次の7件を追加します。
+操作場所は既存 Windows DNS サーバーの「DNS マネージャー」です。AD 統合 DNS の設定は複製先にも適用されます。既存のオンプレミス環境を利用する場合、既存の名前解決に影響を与える変更ですので、十分ご注意ください。新規の専用ラボでは次の7件を追加します。
 
 1. 「DNS マネージャー」で対象 DNS サーバー →「条件付きフォワーダー」を右クリックし、「新しい条件付きフォワーダー」を選びます。
 2. 次の各行について「DNS ドメイン」と「マスター サーバーの IP アドレス」を入力し、「OK」を押します。7件とも同じ Resolver Inbound IP を指定します。
@@ -106,22 +106,36 @@
    | `agentsvc.azure-automation.net` | `10.20.2.4` |
    | `blob.core.windows.net` | `10.20.2.4` |
 
-3. Arc を導入するサーバーで Windows PowerShell を開き、次を実行します。`Get-DnsClientServerAddress` の結果は、この Windows DNS サーバーの IP になっている必要があります。①の L2 は構築済みの設定を使います。別環境では対象サーバーのネットワーク アダプターの IPv4 DNS 設定に Windows DNS の IP を指定します。
+   ![設定後の DNS マネージャー。7件の条件付きフォワーダーと、選択した his.arc.azure.com の転送先 10.20.2.4](images/03-onpremises/3-2-01-conditional-forwarders.png)
+
+3. Arc を導入するサーバーで Windows PowerShell を開き、次を実行します。
 
    ```powershell
-   $dnsServer = '10.30.1.5'
-   $arcHis = '<3-1 の Arc PE にある HIS の公開 FQDN>'
-   $arcGuestConfig = '<3-1 の Arc PE にある Guest Configuration の公開 FQDN>'
-   $dce = '<②の DCE 構成アクセス FQDN>'
-   $ods = '<②の LAW ODS FQDN>'
-   Get-DnsClientServerAddress -AddressFamily IPv4
-   foreach ($fqdn in @($arcHis, $arcGuestConfig, $dce, $ods)) {
-       Resolve-DnsName $fqdn -Server $dnsServer -ErrorAction Stop
-       Test-NetConnection $fqdn -Port 443
-   }
+   Resolve-DnsName gbl.his.arc.azure.com
+   Resolve-DnsName japaneast-gas.guestconfiguration.azure.com
    ```
 
-確認: 最終 A レコードが対応する PE の IP で、`TcpTestSucceeded` が `True` です。DNS マネージャーで Resolver の検証に警告が出る場合も、実際の名前解決結果で確認します。既存基盤では、利用中の監視サービスと Blob の名前解決・利用が変更前どおりであることも確認してください。
+   ここでは、環境によって変化しない代表的な FQDN を使って名前解決を確認していますが、全 FQDN についても同様に確認する場合は、上記の 7 件の条件付きフォワーダーに対応する FQDN を Private DNS ゾーンの Aレコードなどから確認して、順に `Resolve-DnsName` で確認できます。
+
+   `gbl.his.arc.azure.com` の実行結果例です。次は撮影環境で実際に取得した出力で、IP と TTL は環境・実行時刻によって異なります。
+
+   ```text
+   PS C:\Users\labadmin> Resolve-DnsName gbl.his.arc.azure.com
+
+   Name                           Type   TTL   Section    NameHost
+   ----                           ----   ---   -------    --------
+   gbl.his.arc.azure.com          CNAME  1450  Answer     gbl.privatelink.his.arc.azure.com
+
+   Name       : gbl.privatelink.his.arc.azure.com
+   QueryType  : A
+   TTL        : 10
+   Section    : Answer
+   IP4Address : 10.20.1.18
+
+   PS C:\Users\labadmin>
+   ```
+
+確認: 最終 A レコードの `IP4Address` が、3-1 の Arc PE の「DNS の構成」にある `gbl.his.arc.azure.com` のプライベート IP と一致します。この例では `10.20.1.18` です。
 
 <a id="explicit-proxy"></a>
 
@@ -344,7 +358,7 @@ AZFWApplicationRule
 
 ### 必要な場合だけ使う管理端末の補助操作
 
-対象サーバー内では実行しません。管理端末の PowerShell 7 と、[Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli)を使います。事前確認で決めた認証方法で対象テナントへサインインし、`az account show` の tenant / subscription / 実行 ID / 認証種別を承認記録と照合します。証明書を使う場合は[事前確認](prerequisites.md)に従ってください。
+対象サーバー内では実行しません。管理端末の PowerShell 7 と、[Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli)を使います。実施環境の認証手順で対象テナントへサインインし、`az account show` の `tenantId`、`id`（Subscription ID）、`user`（実行 ID と認証種別）を今回の作業先と照合します。
 
 Arc サーバーと DCE の「概要 → JSON ビュー」の `id` をコピーします。Portal で設定取得用 DCE を関連付けられない場合は、[公式 CLI コマンド](https://learn.microsoft.com/azure/azure-monitor/fundamentals/private-link-vm-kubernetes#associate-vmcluster-with-dce)を実行します。DCE の「リソース」と既存の関連付けを確認し、別の DCE が関連付いている場合は置き換えず管理者と調整してください。
 
