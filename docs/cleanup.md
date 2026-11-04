@@ -1,6 +1,6 @@
 # 後片付け・切り戻し
 
-[README](../README.md) / [事前確認](prerequisites.md)
+[README](../README.md) / [① 検証用ラボ](01-lab.md) / [② Azure VM](02-azure.md) / [③ オンプレミス Windows](03-onpremises.md)
 
 ## 原則
 

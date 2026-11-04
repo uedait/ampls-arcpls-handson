@@ -1,6 +1,6 @@
 # ① 任意：検証用ラボの構築
 
-[トップ](../README.md) | [前提条件](./prerequisites.md) | [② Azure VM](./02-azure.md) | [③ オンプレミス Windows](./03-onpremises.md)
+[トップ](../README.md) | [② Azure VM](./02-azure.md) | [③ オンプレミス Windows](./03-onpremises.md)
 
 この章は、②③で使用する Azure VM、オンプレミス Windows Server、DNS とネットワークがそろっている場合には省略できます。
 オンプレミス環境がない場合など、Azure 上に疑似的なオンプレミス環境を用意してハンズオンを進めたい場合にご利用ください。
@@ -53,7 +53,6 @@ VM の割り当て解除後も Bastion、Firewall、Resolver、Public IP、デ�
 Windows の管理端末に PowerShell 7、Git、Azure CLI、GitHub CLI と Azure CLI から使用できる Bicep を用意してください。
 管理端末から Azure、`github.com`、GitHub API と `codeload.github.com` へ HTTPS 接続できる必要があります。
 また、Azure のデプロイに必要な権限を用意してください。
-[前提条件](prerequisites.md#3-権限とソフトウェアを確認する)も参照してください。
 
 PowerShell 7 を開き、資料を保存するフォルダーへ移動してから、次を実行します。
 

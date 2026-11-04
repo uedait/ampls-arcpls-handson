@@ -1,6 +1,6 @@
 # ③ オンプレミス Windows Server を Arc PLS と AMPLS に登録する
 
-[README](../README.md) → [② Azure VM](02-azure.md) → ③ → [結果の確認](validation.md)
+[README](../README.md) → [② Azure VM](02-azure.md) → ③
 
 ## この章で行うこと
 
@@ -352,7 +352,7 @@ AZFWApplicationRule
 | take 100
 ```
 
-確認: Arc の認証先・管理先への Allow を確認します。詳細な試験番号と記録方法は[結果の確認](validation.md)にまとめています。
+確認: Arc の認証先・管理先への Allow を確認します。
 
 <a id="management-commands"></a>
 

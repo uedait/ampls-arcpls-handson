@@ -1,6 +1,6 @@
 # 障害調査
 
-[README](../README.md) / [合格条件](validation.md) / [切り戻し](cleanup.md)
+[README](../README.md) / [② Azure VM](02-azure.md) / [③ オンプレミス](03-onpremises.md) / [切り戻し](cleanup.md)
 
 失敗した操作、対象、UTC 時刻、終了コード、検索期間を記録し、次の表で原因を切り分けてください。公開アクセスの全許可、bypass への AAD / ARM の追加、TLS 証明書検証の無効化は、必要な通信制限を外し検証する経路を変えるリスクがあるため、障害回避のために実施しないでください。
 

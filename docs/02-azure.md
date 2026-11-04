@@ -1,12 +1,12 @@
 # ② 既存 Azure VM のログを AMPLS 経由で収集する
 
-[README](../README.md) → [事前確認](prerequisites.md) → ② → [③ オンプレミス](03-onpremises.md)
+[README](../README.md) → [① 検証用ラボ（任意）](01-lab.md) → ② → [③ オンプレミス](03-onpremises.md)
 
 ## この章の完了条件
 
 対象 Azure VM の Azure Monitor Agent（AMA）が Data Collection Endpoint（DCE）から設定を取得し、Log Analytics Workspace（LAW）へ新しい Heartbeat を送信することを確認します。合格には、DCE の公開アクセス無効、LAW の公開取り込み無効、Azure Monitor Private Link Scope（AMPLS）の取り込み PrivateOnly、Restricted NSG、DNS と TCP の成功、AMA 自身の DCE と LAW への接続先がそれぞれ Private Endpoint（PE）の IP、制限確認後の新しい Heartbeat のすべてが必要です。Windows イベントの生成と確認は任意試験です。
 
-以下は新規の専用収集リソースを作る手順です。同じ DNS 解決範囲に既存 AMPLS がある場合は、[事前確認](prerequisites.md)で競合と影響を確認し、管理者の承認を得てから進めてください。
+以下は新規の専用収集リソースを作る手順です。同じ DNS 解決範囲に既存 AMPLS がある場合は、競合と既存監視への影響を確認し、管理者の承認を得てから進めてください。
 
 ①のラボでは workload VM の専用 PIP を維持し、NIC NSG は Restricted の状態で実施します。AMA の初回配布に公開宛先が必要な場合は、配布先と必要な通信を特定して変更を承認してください。配布用の例外は対象・期間を限定し、例外終了後の Restricted 状態で閉域収集の合否を判定します。
 
@@ -37,7 +37,7 @@
 
    | 項目 | 入力 |
    |---|---|
-   | サブスクリプション / RG | 事前確認で承認した作業先 |
+   | サブスクリプション / RG | 今回使用する作業先。①のラボを使用する場合は、①で指定したサブスクリプションとラボ専用 RG |
    | 名前 | `law-lab1031` など、記録した名前 |
    | リージョン | 対象 VM と同じ。例 Japan East |
 
@@ -105,7 +105,7 @@ DCE は AMA が Data Collection Rule（DCR）の設定を取得するために�
    ![AMPLS 一覧の作成ボタン](images/02-azure/2-3-02-ampls-list.png)
 
 2. サブスクリプション、作業用 RG、名前 `ampls-lab1031` を指定します。
-3. 取り込みのアクセスモードを `Private Only` にします。クエリは事前確認の方針に合わせ、このハンズオンの初期値は `Open` とします。
+3. 取り込みのアクセスモードを `Private Only` にします。クエリのアクセスモードは `Open` とします。
 
    ![AMPLS の名前、RG、クエリ Open と取り込み Private Only の入力画面](images/02-azure/2-3-03-ampls-basics.png)
 
@@ -293,9 +293,9 @@ AMA はプロキシを使わない直接接続 `proxy.mode=none` が必須です
 
 ### 必要な場合だけ使う管理端末の補助操作
 
-操作場所はリポジトリを配置した管理端末の PowerShell 7 です。VM 内では実行しません。承認済みの変更範囲を確認し、事前確認の証明書で Azure CLI に `az login` し、`.env` の tenant / subscription / client ID と認証種別を実際の接続先と照合してください。`az account show` の tenant / subscription も確認します。
+操作場所はリポジトリを配置した管理端末の PowerShell 7 です。VM 内では実行しません。承認済みの変更範囲を確認し、実施環境の認証手順で Azure CLI にサインインしてください。`az account show` の `tenantId`、`id`（Subscription ID）、`user`（実行 ID と認証種別）を今回の作業先と照合します。
 
-Tenant ID と Subscription ID は事前確認の承認記録から取得します。VM と DCE の完全なリソース ID が必要な場合は、そのリソースの Portal「概要 → JSON ビュー」の `id` をコピーします。VM の RG と名前は VM の概要で確認します。
+Tenant ID は Portal の「Microsoft Entra ID → 概要」で、Subscription ID は対象サブスクリプションの「概要」で確認します。VM と DCE の完全なリソース ID が必要な場合は、そのリソースの Portal「概要 → JSON ビュー」の `id` をコピーします。VM の RG と名前は VM の概要で確認します。
 
 Portal で設定取得用 DCE を関連付けられない場合だけ、リポジトリのルートで次を実行します。VM に DCE 関連付けを作成します。別の DCE が既に関連付いている場合は、置き換えず停止します。
 
