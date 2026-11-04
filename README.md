@@ -9,25 +9,13 @@ Azure Monitor Private Link と Azure Arc Private Link を使用し、Azure VM �
 - ② : Azure VM からのログ収集のハンズオンを行う章です。
 - ③ : オンプレミスマシンのログ収集のハンズオンを行う章です。
 
-## 資料を取得する
-Private リポジトリを使用する場合、閲覧権限のある GitHub アカウントで取得してください。Git を使わない場合は「Code → Download ZIP」で取得して展開できます。管理端末の PowerShell では次を使用します。
-
-```powershell
-git clone https://github.com/uedait/ampls-arcpls-handson.git
-Set-Location .\ampls-arcpls-handson
-```
-
-以降の管理端末用コマンドは、このフォルダーを基準とします。Windows サーバー内の操作は各章で実行場所を分けて示します。
-
 ## 進め方
 
 | 章 | 内容 | 対象 |
 |---|---|---|
-| [事前確認](docs/prerequisites.md) | 権限、入力値、費用、既存 DNS / AMPLS への影響と変更承認 | 全員 |
 | [① 任意の検証環境準備](docs/01-lab.md) | 3 VNet、AzFW、Bastion、Resolver、3 VM の PIP・NSG、ISO からの Nested VM 構築と送信制限 | 講師・検証者 |
 | [② Azure VM の登録](docs/02-azure.md) | LAW、DCE、AMPLS、PE、Private DNS、DCR、AMA | 既存 Azure 環境の担当者 |
 | [③ オンプレミスの登録](docs/03-onpremises.md) | Arc PLS、条件付きフォワーダー、Proxy、Arc、AMA | オンプレミスと Azure の担当者 |
-| [結果の確認](docs/validation.md) | ログ、接続先、否定試験、結果記録 | 全員 |
 | [障害調査](docs/troubleshooting.md) | DNS、Agent、Proxy、ログ到着の切り分け | 必要な場合 |
 | [後片付け・切り戻し](docs/cleanup.md) | 今回の変更だけを戻す手順 | 全員 |
 

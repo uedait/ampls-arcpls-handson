@@ -10,13 +10,9 @@
 
 ![DNS と Agent の通信経路](images/02-network-details.png)
 
-図の編集用正本は[全体構成の Excalidraw](images/01-architecture.excalidraw)と[DNS・Agent の詳細構成の Excalidraw](images/02-network-details.excalidraw)です。[全体構成の SVG](images/01-architecture.svg)と[詳細構成の SVG](images/02-network-details.svg)は派生物です。
-
 ## 対象範囲
 
 同一テナント、同一リージョンで、Azure VM とオンプレミス Windows Server からのログ収集を検証します。①は Azure 上に疑似オンプレミス環境を作る任意の準備手順です。②は Azure VM の AMA と AMPLS、③はオンプレミスの Arc / AMA と Arc PLS / AMPLS を扱います。
-
-複数テナント、複数リージョン、Lighthouse、Azure Arc Gateway、Microsoft Sentinel、VM Insights、性能カウンターは対象外です。Security ログや全イベントの収集も扱いません。
 
 ## 対象と役割
 
@@ -32,9 +28,7 @@
 | オンプレミス | Windows Server | Connected Machine agent と AMA を導入する |
 | VNet 外の論理リソース | LAW、DCE、DCR、AMPLS、Arc PLS | データ格納、収集定義、接続範囲を管理する |
 
-LAW は Log Analytics Workspace、DCE は Data Collection Endpoint、DCR は Data Collection Rule の略です。AMPLS と Arc PLS は別のサービスです。DCR は収集するデータと送信先を定義します。②は動作確認済みの Application / Source `AmplsArcHandson` / EventID `9001` の XPath と LAW 宛先を持つ DCR を使用します。Heartbeat は AMA の稼働に伴う自動データで、収集元として選択する項目ではありません。Azure VM の基本試験 LOG-1 は新しい Heartbeat、任意試験 LOG-1E は今回生成した Event を確認します。Arc の LOG-2 は Heartbeat と今回生成した Event の両方を必須とします。
-
-②の基本試験は、初回 Heartbeat の確認後に LAW の公開取り込みと DCE の公開アクセスを無効にし、制限反映後の新しい Heartbeat を確認します。既に制限済みの環境は公開アクセスを再び有効にせず、現在の設定を確認した UTC 時刻を基準にします。生成時刻と取り込み時刻の両方が基準時刻より後の記録を使用します。合格には、LAW 取り込み無効、DCE 公開アクセス無効、AMPLS 取り込み PrivateOnly、Restricted NSG、DNS / TCP 成功、AMA 自身の DCE / LAW 接続先がそれぞれ PE の IP、新しい Heartbeat のすべてが必要です。公開クエリは有効を維持し、閲覧には Azure の認証と RBAC 権限を必要とします。
+LAW は Log Analytics Workspace、DCE は Data Collection Endpoint、DCR は Data Collection Rule の略です。AMPLS と Arc PLS は別のサービスです。DCR は収集するデータと送信先を定義します。②は動作確認済みの Application / Source `AmplsArcHandson` / EventID `9001` の XPath と LAW 宛先を持つ DCR を使用します。AMA の稼働に伴うHeartbeat と、生成した Event が収集できることを確認できます。
 
 ## 通信経路と Proxy の使い分け
 
@@ -60,7 +54,7 @@ AzFW の Explicit Proxy は Firewall Policy で有効化します。HTTP の同�
 2. Resolver が公開 FQDN の CNAME と、hub VNet にリンクされた Private DNS zone のレコードを解決します。
 3. 対象サーバーが応答された PE の Private IP へ TCP 443 で接続します。DNS の問い合わせと Agent の HTTPS 通信は別の通信です。
 
-Windows DNS の条件付きフォワーダーには、次の表の公開ドメインを指定してください。Agent の接続先を `privatelink` 付きの FQDN に置き換える必要はありません。
+Windows DNS の条件付きフォワーダーには、次の表の公開ドメインを指定してください。
 
 | 条件付きフォワーダー | hub にリンクする Private DNS zone | 対象 |
 |---|---|---|
@@ -118,15 +112,15 @@ NSG が判定するのは VM が送信するパケットの宛先です。Arc Ag
 
 NSG はステートフルです。規則変更後も既存フローが続く場合があるため、構築中の通信を終了し、新しい接続で Restricted の成否を確認します。AMA / VM 拡張機能の初回配布・更新は、ログの稼働通信と分けて検証します。配布用の例外が必要な場合は、実際の宛先、対象 VM、期間を承認し、例外終了後の Restricted 状態で新規ログの到着を判定してください。
 
-## 最小変更として評価する項目
+## 既存環境を使用する場合の変更箇所
+
+既存環境を利用する場合には、主に以下のような変更を既存環境に対して加える必要があります。ここに記載していない細かな事項も含め、利用者が既存環境への影響を十分に評価・検討してください。不安がある場合には、Azure 上に[① 検証用ラボ](01-lab.md)を用意することが可能です。
 
 1. 既存 Windows DNS への7条件付きフォワーダー追加。
 2. Portal が生成する公式スクリプトによる対象サーバーへの Arc 導入・登録と、公式 `azcmagent` コマンドによる Arc 固有の Proxy / bypass 設定。登録前に bypass を `Arc` に設定し、OS 全体の Proxy は維持する。
 3. 対象サーバーへの AMA 拡張機能導入、直接接続の指定、DCR / DCE 関連付け。
 4. DNS、PE、Proxy への到達を許可する既存 Firewall 等の設定。手順③のソース `*` は専用ラボの例であり、共有 Firewall は対象の送信元に限定する。既存通信の直接遮断と閉域経路の試験条件は維持する。
 5. Azure 側の AMPLS、Arc PLS、PE、DNS zone、収集リソースの準備。
-
-「最小変更」は実機検証で確定する結果です。既存の監視、DNS、更新経路によって追加の調整が必要になる場合があります。
 
 ## 根拠
 
