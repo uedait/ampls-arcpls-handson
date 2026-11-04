@@ -4,7 +4,7 @@
 
 ## 実行場所と入力
 
-管理端末の PowerShell 7 から `infra\lab\Deploy-Lab.ps1` を実行します。Azure CLI、GitHub CLI、Bicep を事前に用意し、対象の Azure サブスクリプションと Private GitHub リポジトリを利用できるアカウントを使用してください。
+管理端末の PowerShell 7 から `infra\lab\Deploy-Lab.ps1` を実行します。Azure CLI、GitHub CLI、Bicep を事前に用意し、対象の Azure サブスクリプションへの操作権限と GitHub CLI の認証を用意してください。現行のスクリプトは公開リポジトリでも GitHub 認証を必須とします。Private リポジトリを使用する場合は、その読み取り権限も必要です。
 
 対話入力は対象サブスクリプション、ラボ専用 RG、名前の接頭辞、Azure VM の管理者情報、L2 の Administrator パスワードを中心に行います。IP、VM の役割別サフィックス、リージョン、VM サイズには既定値を使用します。作成先、取得コミット、課金対象と最終的な送信制限を表示し、承認後に構築を開始します。
 
@@ -51,7 +51,7 @@ Azure API の要求成功、Run Command の ProvisioningState、ゲストスク�
 
 ## 資格情報と取得ファイル
 
-Private GitHub の長期トークンは管理端末の GitHub CLI 認証から使用します。各 VM にはコミット固定 ZIP の短期取得 URL を Managed Run Command の保護パラメーターで渡します。URL を発行してから直ちに使用し、GitHub トークン自体を各 VM に保存する方式は採用しません。
+GitHub トークンは管理端末の GitHub CLI 認証から取得し、コミットの照会と ZIP 取得 URL の取得に使用します。各 VM にはコミット固定 ZIP の取得 URL を Managed Run Command の保護パラメーターで渡し、直ちに使用します。Private リポジトリでは短期 URL を使用します。公開リポジトリでも同じ取得処理を使用しますが、URL が認証なしで利用できる場合があります。GitHub トークン自体を各 VM に保存する方式は採用しません。
 
 Azure の管理者パスワードは secure パラメーターとして ARM の要求本文へ渡し、CLI 引数や生成パラメーターファイルへ保存しません。L2 パスワードと短期取得 URL は Run Command の保護パラメーターを使用します。Windows の Run Command ハンドラー内部では保護パラメーターが引数として展開されるため、VM 管理者と Azure の実行権限も適切に制限してください。
 
