@@ -39,6 +39,11 @@
    ![Azure Arc のプライベート リンク スコープ一覧で「作成」を選ぶ画面](images/03-onpremises/3-1-01-arcpls-create.png)
 
 2. サブスクリプション、RG、名前 `arcpls-handson`、リージョン Japan East を指定します。「パブリック ネットワーク アクセスを許可」はオフにします。
+
+   次の画面は入力途中の例です。「Allow public network access」がオンになっているため、チェックを外してから進みます。画像の `rg-1031-lab` は撮影環境の名前です。①の既定値で構築した場合は `rg-arclab-lab` を選びます。
+
+   ![Arc PLS の基本設定の入力途中。公開アクセスのチェックを外す前の画面](images/03-onpremises/3-1-02-arcpls-basics.png)
+
 3. 「Private Endpoint」タブで、プライベート エンドポイントの追加を選び、次を指定します。
 
    | 項目 | 入力例 |
@@ -53,10 +58,32 @@
    | 新規作成する DNS ゾーン | `privatelink.his.arc.azure.com`、`privatelink.guestconfiguration.azure.com` |
 
    既存の承認済み DNS ゾーンがある場合は、それを選択します。AMPLS のゾーンはここでは選びません。
+
+   次の撮影画面では、上記2ゾーンに加えて `privatelink.dp.kubernetesconfiguration.azure.com` も DNS 統合の作成候補として表示されています。画面に表示された候補と作成先 RG を確認します。VNet は撮影環境の `lab1031-hub` ではなく、自分が②で使用した hub VNet を選びます。
+
+   ![PE の名前、hub VNet、snet-pe、DNS 統合と作成先 RG の入力画面](images/03-onpremises/3-1-03-pe-input.png)
+
+   ![PE の入力を確定し、Arc PLS の作成画面の一覧に追加した状態](images/03-onpremises/3-1-04-pe-added.png)
+
 4. PE の入力画面の「OK / 追加」を押して Arc PLS の作成画面へ戻ります。「確認および作成 → 作成」を押し、デプロイの完了を待ちます。PE の入力だけでは、リソース作成は完了していません。
+
+   「Review + create」で `Public network access` が `Disable / Disabled` であることを確認してから「Create」を押します。次の画像は公開アクセスが `Enable` の入力途中の画面です。この状態では「Previous」で基本設定へ戻り、「Allow public network access」のチェックを外してください。画像はデプロイ完了を示すものではありません。
+
+   ![Arc PLS と PE の作成前の確認画面。公開アクセスを無効へ修正する前の状態](images/03-onpremises/3-1-05-arcpls-review.png)
+
 5. Portal の検索で「リソース グループ」を開き、`rg-arclab-lab` → `arcpls-handson` を開きます。「プライベート エンドポイント接続」で `pe-arc-handson` の接続状態が `Approved` であることを確認します。承認待ちの場合は Arc PLS の所有者へ承認を依頼します。
+
+   ![作成した Arc PLS の概要で公開アクセスが Disabled の状態](images/03-onpremises/3-1-06-arcpls-overview.png)
+
+   ![Arc PLS のプライベート エンドポイント接続が Approved の状態](images/03-onpremises/3-1-07-pe-approved.png)
+
 6. 同じ RG から `pe-arc-handson` →「DNS の構成」を開きます。HIS と Guest Configuration の公開 FQDN と、それぞれのプライベート IP を控えます。後のコマンドには `privatelink` 付きの名前ではなく、この画面にある公開 FQDN を使います。
+
+   ![Arc PE の DNS 構成にある公開 FQDN とプライベート IP の一覧](images/03-onpremises/3-1-08-pe-dns.png)
+
 7. Portal の検索で「プライベート DNS ゾーン」を開き、上記2ゾーンをそれぞれ開きます。「仮想ネットワーク リンク」に `arclab-hub` があり、リンク状態が `Completed` であることを確認します。なければ「追加」で hub VNet を選び、「自動登録を有効にする」をオフにして作成します。PE のレコードは DNS 統合で管理するため、VM の名前を自動登録する必要はありません。
+
+   ![HIS のプライベート DNS ゾーンで hub へのリンクが Completed、自動登録が無効の状態](images/03-onpremises/3-1-09-his-dns-link.png)
 
 確認: Arc PLS の公開アクセスが無効で、Arc PE が承認済みです。Arc PLS と後で登録する Arc サーバーは同じリージョンを使います。Arc PE と②の AMPLS PE は別のリソースです。
 
