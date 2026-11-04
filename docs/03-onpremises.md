@@ -180,9 +180,9 @@
    ![Firewall Policy のカスタム DNS に 10.20.2.4 を指定し、DNS Proxy を無効にした入力画面](images/03-onpremises/3-3-04-firewall-dns.png)
 
 5. Premium を使う場合は、追加した Application 規則を開き、「TLS 検査」をチェックせず保存します。Arc 用の通信は証明書を置き換えません。①の Standard には TLS 検査の設定がないため、この操作は不要です。共有 Policy の TLS 検査全体は変更しません。
-6. Firewall 本体の「診断設定 → 診断設定を追加」を開き、Application rule のログを選択します。「Log Analytics ワークスペースに送信する」で②の LAW を指定し、宛先テーブルに「リソース固有」を選んで保存します。ログは `AZFWApplicationRule` に入ります。既に同じ設定があれば追加不要です。診断ログの取り込み費用が発生します。
+6. Firewall 本体の「診断設定 → 診断設定を追加」を開き、Application rule のログを選択します。「Log Analytics ワークスペースに送信する」で②の LAW を指定し、宛先テーブルに「Azure Diagnostics」を選んで保存します。ログは `AzureDiagnostics` に入ります。既に同じ設定があれば追加不要です。診断ログの取り込み費用が発生します。
 
-   次の画像では `allLogs` と「Azure Diagnostics」が選択されています。本手順の後半の KQL は「リソース固有」の `AZFWApplicationRule` を使うため、同じ KQL を使う場合は「リソース固有」を選んで保存してください。「Azure Diagnostics」を維持する場合は `AzureDiagnostics` テーブル用の KQL が必要です。本手順の `AZFWApplicationRule` 用 KQL はそのまま使えません。
+   画像では `allLogs` で Application rule を含むログを一括選択しています。本手順の後半の KQL は、この「Azure Diagnostics」の設定に合わせています。
 
    ![Firewall の診断設定で LAW を指定した画面。allLogs と Azure Diagnostics が選択されている状態](images/03-onpremises/3-3-06-firewall-diagnostics.png)
 
@@ -242,7 +242,9 @@
      & "$installScriptPath" -proxy "http://10.20.0.4:3128";
      ```
 
-   - **登録後も使う Arc Agent の Proxy 設定**: ダウンロード・インストールの `-proxy` だけでは、稼働する Agent の通信経路を設定したことにはなりません。`proxy.url` は認証・ARM 等の公開通信に Firewall のプロキシを使う設定、`proxy.bypass=Arc` は HIS / Guest Configuration に PE へ直接接続する設定です。直接インターネットへ接続できる環境では追加せずに動く場合もありますが、本ハンズオンの通信経路には両設定が必要です。既に同じ Agent 設定がある場合は追加不要です。
+   - **Arc と AMA の通信経路を設定する**: ダウンロード・インストールの `-proxy` だけでは、稼働する Agent の通信経路を設定したことにはなりません。`proxy.url` は認証・ARM 等の公開通信に Firewall のプロキシを使う設定です。`proxy.bypass` に `Arc,AMA` を指定し、Arc の HIS / Guest Configuration と、後で導入する AMA の通信は、それぞれの Private Endpoint へ直接接続させます。AMA を導入する3-5より前に設定します。既に同じ Agent 設定がある場合は追加不要です。[公式の Proxy bypass 設定](https://learn.microsoft.com/azure/azure-arc/servers/manage-agent-proxy-settings#proxy-bypass-for-private-endpoints)も参照してください。
+
+     > 今回のハンズオンでは、AMA は Proxy を利用せず、AMPLS の Private Endpoint 経由でログを取り込みます。そのため、Proxy のバイパスに `Arc,AMA` を設定します。`Arc` だけを指定すると、AMA は Arc の Proxy 設定を参照して Proxy 経由の疎通を試み、本ハンズオンの通信制限では失敗する挙動になります。
 
      `# Run connect command` を検索し、その直前の `Start-Sleep -Seconds 5;` との間に次を追加します。画像では59行目の待機処理の後、60行目以降が追加位置です。行番号は生成ファイルによって異なるため、コメントを目印にします。元の `connect` コマンドは変更せず残してください。
 
@@ -254,13 +256,13 @@
      $arc = "$env:ProgramW6432\AzureConnectedMachineAgent\azcmagent.exe"
      & $arc config set proxy.url 'http://10.20.0.4:3128'
      if ($LASTEXITCODE -ne 0) { throw 'Arc proxy setup failed.' }
-     & $arc config set proxy.bypass 'Arc'
+     & $arc config set proxy.bypass 'Arc,AMA'
      if ($LASTEXITCODE -ne 0) { throw 'Arc proxy bypass setup failed.' }
 
      # Run connect command
      ```
 
-     ![追加後の公式スクリプト。待機処理と connect 呼び出しの間に Proxy URL と bypass Arc を設定](images/03-onpremises/3-4-06-proxy-after.png)
+     ![追加後の公式スクリプト。待機処理と connect 呼び出しの間に Proxy URL と bypass Arc,AMA を設定](images/03-onpremises/3-4-06-proxy-after.png)
 
    - **デバイス登録コードでの登録**: スクリプトそのままでは、Agent は直接インターネット疎通による登録を試みます。ハンズオンの環境は、インターネット疎通ができないため、デバイスコード認証で登録するようにスクリプトを修正します。azcmagent.exe ... connect の行に、--use-device-code を追加する必要があります。デバイスコード認証が不可能な場合には、[公式の別認証方法](https://learn.microsoft.com/azure/azure-arc/servers/azcmagent-connect)を確認してください。
 
@@ -308,7 +310,7 @@
 
    この例では、HIS / Guest Configuration は「到達可能」と「プライベート」が `true`、プロキシが `bypassed` です。認証・ARM 等の公開宛先は「到達可能」が `true`、プロキシが `set` です。公開宛先の「プライベート」欄の `unknown` を、到達失敗とは扱いません。
 
-確認: 有効な Proxy URL が指定どおりで、bypass が `Arc` です。ネットワークチェックでは HIS / Guest Configuration が Private Endpoint を使い、認証・ARM 等の必須チェックも成功します。
+確認: 有効な Proxy URL が指定どおりで、bypass が `Arc,AMA` です。ネットワークチェックでは HIS / Guest Configuration が Private Endpoint を使い、認証・ARM 等の必須チェックも成功します。
 
 <a id="arc-monitoring"></a>
 
@@ -399,6 +401,8 @@ EventViewer で [Windows Logs -> Application ] に EventID 9001 のログが記�
    | take 100
    ```
 
+   ![ArcOnpremL2 の Heartbeat の生成時刻と取り込み時刻を確認した結果](images/03-onpremises/3-5-12-heartbeat-result.png)
+
 7. 同じ画面で、今回のイベントの Marker と GeneratedUtc を貼り付けて実行します。検索期間は生成時刻の1分前から29分後までの30分、上限100件です。
 
    ```kusto
@@ -416,25 +420,37 @@ EventViewer で [Windows Logs -> Application ] に EventID 9001 のログが記�
    | take 100
    ```
 
+   次の画像は対象 Arc サーバーの EventID 9001 の到着例です。撮影時は過去24時間を検索しています。実施時は上記の KQL で今回の Marker と生成時刻に絞り込みます。
+
+   ![ArcOnpremL2 の検証イベント EventID 9001 が LAW に到着した結果](images/03-onpremises/3-5-13-event-result.png)
+
 確認: 最新の Heartbeat と今回の Marker の Event が対象 Arc サーバーから到着します。Heartbeat の生成時刻と取り込み時刻も確認します。初回は15分を目安に待ちます。0件の場合は検索期間と結果を記録し、検索エラーの場合はエラーを記録して[障害調査](troubleshooting.md)へ進みます。途中で公開アクセスや通信制限を変更した場合は、変更後に生成・取り込みされたログで確認します。
 
 閉域経路の合格には、[3-2 の DNS / TCP](#windows-dns)、[Arc のチェック](#arc-onboarding)、[②と同じ AMA の実接続確認](02-azure.md#ama-peers)も必要です。AMA の PID と実行ファイルを照合し、DCE と LAW の両接続先が AMPLS PE の対応する IP であることを確認します。接続を取得できなければ未取得として記録し、ログの到着だけで閉域経路の合格にはしません。①②の Azure VM と③の Arc サーバーの結果は、それぞれのリソース ID で区別します。
 
 ### Proxy を通った公開通信の確認
 
-Firewall の診断設定で指定した LAW の「ログ」で次を実行します。①の L2 は WinNAT を通るため、Firewall が観測する送信元は L1 の `10.30.1.4` です。規則のソースを `*` にしていても、検索は対象送信元と直近30分に絞ります。
+Firewall の診断設定で指定した LAW の「ログ」で次を実行します。①の L2 は WinNAT を通るため、Firewall が観測する送信元は L1 の `10.30.1.4` です。検索は対象送信元、Arc の認証・管理先、直近30分、最大100件に絞ります。
 
 ```kusto
-let sourceIp = "10.30.1.4";
-AZFWApplicationRule
+AzureDiagnostics
 | where TimeGenerated > ago(30m)
-| where SourceIp == sourceIp
-| project TimeGenerated, SourceIp, Fqdn, Action, Protocol
+| where ResourceProvider == "MICROSOFT.NETWORK"
+| where Category == "AzureFirewallApplicationRule"
+| where msg_s contains "10.30.1.4"
+| where msg_s contains "login.microsoftonline.com"
+    or msg_s contains ".login.microsoft.com"
+    or msg_s contains "management.azure.com"
+    or msg_s contains "pas.windows.net"
+| project TimeGenerated, IngestedAt=ingestion_time(),
+          Message=msg_s
 | order by TimeGenerated desc
 | take 100
 ```
 
 確認: Arc の認証先・管理先への Allow を確認します。
+
+![AzureDiagnostics で Arc の認証先と ARM への通信が Allow になった結果](images/03-onpremises/3-5-14-firewall-proxy-allow.png)
 
 ## 根拠
 
