@@ -52,7 +52,7 @@ foreach ($file in $files) {
         }
     }
 }
-$details = Get-Content -LiteralPath (Join-Path $root 'docs\architecture.md') -Raw
+$details = Get-Content -LiteralPath (Join-Path $root 'docs\90-architecture.md') -Raw
 foreach ($domain in @(
     'his.arc.azure.com', 'guestconfiguration.azure.com', 'monitor.azure.com',
     'oms.opinsights.azure.com', 'ods.opinsights.azure.com',

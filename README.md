@@ -24,13 +24,14 @@ Set-Location .\ampls-arcpls-handson
 | 章 | 内容 | 対象 |
 |---|---|---|
 | [事前確認](docs/prerequisites.md) | 権限、入力値、費用、既存 DNS / AMPLS への影響と変更承認 | 全員 |
-| [構成と通信](docs/architecture.md) | 直接接続と Proxy の使い分け、必要な変更 | 全員 |
 | [① 任意の検証環境準備](docs/01-lab.md) | 3 VNet、AzFW、Bastion、Resolver、3 VM の PIP・NSG、ISO からの Nested VM 構築と送信制限 | 講師・検証者 |
 | [② Azure VM の登録](docs/02-azure.md) | LAW、DCE、AMPLS、PE、Private DNS、DCR、AMA | 既存 Azure 環境の担当者 |
 | [③ オンプレミスの登録](docs/03-onpremises.md) | Arc PLS、条件付きフォワーダー、Proxy、Arc、AMA | オンプレミスと Azure の担当者 |
 | [結果の確認](docs/validation.md) | ログ、接続先、否定試験、結果記録 | 全員 |
 | [障害調査](docs/troubleshooting.md) | DNS、Agent、Proxy、ログ到着の切り分け | 必要な場合 |
 | [後片付け・切り戻し](docs/cleanup.md) | 今回の変更だけを戻す手順 | 全員 |
+
+構成や通信の仕組みを詳しく確認したい場合は、参考資料の[ハンズオンの詳細仕様](docs/90-architecture.md)を参照してください。
 
 [DNS・Agent 設定と確認項目](docs/images/02-network-details.png)も参照してください。図の編集用正本は [Excalidraw](docs/images/01-architecture.excalidraw) です。[全体構成の SVG](docs/images/01-architecture.svg) と[詳細の Excalidraw](docs/images/02-network-details.excalidraw)・[SVG](docs/images/02-network-details.svg)も用意しています。
 

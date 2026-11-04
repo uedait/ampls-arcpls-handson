@@ -35,6 +35,9 @@
 操作場所は Azure Portal です。
 
 1. 上部の検索で「Azure Arc Private Link Scopes」を開き、「作成」を選びます。
+
+   ![Azure Arc のプライベート リンク スコープ一覧で「作成」を選ぶ画面](images/03-onpremises/3-1-01-arcpls-create.png)
+
 2. サブスクリプション、RG、名前 `arcpls-handson`、リージョン Japan East を指定します。「パブリック ネットワーク アクセスを許可」はオフにします。
 3. 「Private Endpoint」タブで、プライベート エンドポイントの追加を選び、次を指定します。
 

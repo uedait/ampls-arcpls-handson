@@ -1,6 +1,22 @@
-# 構成と通信
+# ハンズオンの詳細仕様
 
-[README](../README.md) / [事前確認](prerequisites.md)
+[README](../README.md) / [① 検証用ラボ](01-lab.md) / [② Azure VM](02-azure.md) / [③ オンプレミス Windows](03-onpremises.md)
+
+この資料は、ハンズオンの構成と通信の仕組みを詳しく確認するための参考資料です。実行手順は①②③に記載しています。
+
+## 構成図
+
+![ハンズオンの全体構成](images/01-architecture.png)
+
+![DNS と Agent の通信経路](images/02-network-details.png)
+
+図の編集用正本は[全体構成の Excalidraw](images/01-architecture.excalidraw)と[DNS・Agent の詳細構成の Excalidraw](images/02-network-details.excalidraw)です。[全体構成の SVG](images/01-architecture.svg)と[詳細構成の SVG](images/02-network-details.svg)は派生物です。
+
+## 対象範囲
+
+同一テナント、同一リージョンで、Azure VM とオンプレミス Windows Server からのログ収集を検証します。①は Azure 上に疑似オンプレミス環境を作る任意の準備手順です。②は Azure VM の AMA と AMPLS、③はオンプレミスの Arc / AMA と Arc PLS / AMPLS を扱います。
+
+複数テナント、複数リージョン、Lighthouse、Azure Arc Gateway、Microsoft Sentinel、VM Insights、性能カウンターは対象外です。Security ログや全イベントの収集も扱いません。
 
 ## 対象と役割
 
@@ -20,14 +36,14 @@ LAW は Log Analytics Workspace、DCE は Data Collection Endpoint、DCR は Dat
 
 ②の基本試験は、初回 Heartbeat の確認後に LAW の公開取り込みと DCE の公開アクセスを無効にし、制限反映後の新しい Heartbeat を確認します。既に制限済みの環境は公開アクセスを再び有効にせず、現在の設定を確認した UTC 時刻を基準にします。生成時刻と取り込み時刻の両方が基準時刻より後の記録を使用します。合格には、LAW 取り込み無効、DCE 公開アクセス無効、AMPLS 取り込み PrivateOnly、Restricted NSG、DNS / TCP 成功、AMA 自身の DCE / LAW 接続先がそれぞれ PE の IP、新しい Heartbeat のすべてが必要です。公開クエリは有効を維持し、閲覧には Azure の認証と RBAC 権限を必要とします。
 
-## 通信を分ける
+## 通信経路と Proxy の使い分け
 
 | 通信 | 経路 | 設定 |
 |---|---|---|
 | Azure VM / オンプレミス AMA の設定取得・ログ送信 | AMPLS PE へ直接 HTTPS | AMA `proxy.mode=none`、DCR / DCE の関連付け |
 | Arc の HIS / Guest Configuration | Arc PLS PE へ直接 HTTPS | `proxy.bypass=Arc`、Arc PLS への関連付け |
 | Arc の Entra ID / ARM 等の公開宛先 | AzFW Explicit Proxy → HTTPS の宛先 | `proxy.url=http://<FW のプライベート IP>:3128` |
-| オンプレミスからの対象7ドメインの DNS | Windows DNS → Inbound endpoint → Private DNS zone | 条件付きフォワーダー |
+| オンプレミスからの対象7ドメインの DNS | Windows DNS → Inbound endpoint → Private DNS zone | 条件付きフォワーダー、UDP / TCP 53 |
 | ISO・OS 更新の取得（①の構築中） | 各 VM の専用 Public IP から直接接続 | 初期 NSG の Internet Outbound Allow |
 | Arc インストーラー取得（③） | ダウンロード処理で明示的に Proxy を指定 | Restricted を維持して、Agent 設定の適用前に確認する |
 | 講師の VM 操作 | 管理端末 → hub Bastion → 各 Azure VM | 端末から HTTPS / 443、Bastion から Private IP の RDP / 3389 |
@@ -36,9 +52,15 @@ LAW は Log Analytics Workspace、DCE は Data Collection Endpoint、DCR は Dat
 
 AzFW の Explicit Proxy は Firewall Policy で有効化します。HTTP の同じ待受ポートが HTTP と HTTPS の要求を受け付け、HTTPS では CONNECT を使用します。Firewall Policy の Application rule で、必要な FQDN と宛先ポートを許可します。待受ポート `3128` と宛先 HTTPS の `443` をそれぞれ設定してください。Agent に Proxy URL を直接指定し、TLS は Agent と接続先の間で終端します。TLS 検査による証明書の置き換えは Agent の接続を失敗させるリスクがあるため、これらの通信には適用しないでください。
 
-## 名前解決の対応表
+## DNS の仕組みと名前解決の対応表
 
-Windows DNS の条件付きフォワーダーには、次の表の公開ドメインを指定してください。公開名からの CNAME 解決を経て、PE の Private IP に到達させます。
+オンプレミスの Agent は公開 FQDN を接続先に使用し、次の順に Private IP を取得します。
+
+1. 対象サーバーが Windows DNS に問い合わせます。Windows DNS は対象7ドメインの問い合わせを条件付きフォワーダーで Resolver の Inbound endpoint へ転送します。
+2. Resolver が公開 FQDN の CNAME と、hub VNet にリンクされた Private DNS zone のレコードを解決します。
+3. 対象サーバーが応答された PE の Private IP へ TCP 443 で接続します。DNS の問い合わせと Agent の HTTPS 通信は別の通信です。
+
+Windows DNS の条件付きフォワーダーには、次の表の公開ドメインを指定してください。Agent の接続先を `privatelink` 付きの FQDN に置き換える必要はありません。
 
 | 条件付きフォワーダー | hub にリンクする Private DNS zone | 対象 |
 |---|---|---|
@@ -50,9 +72,28 @@ Windows DNS の条件付きフォワーダーには、次の表の公開ドメ�
 | `agentsvc.azure-automation.net` | `privatelink.agentsvc.azure-automation.net` | AMPLS |
 | `blob.core.windows.net` | `privatelink.blob.core.windows.net` | AMPLS に必要な対象レコード |
 
-AMPLS の PE は複数の IP を使用します。PE の DNS 構成画面に表示された実際の FQDN と IP をすべて記録し、各 FQDN の応答を検証してください。`blob.core.windows.net` の転送では、Private DNS zone に登録された対象のレコードを PE の IP に解決します。それ以外の既存 Blob サービスについても、名前解決と利用状況を変更前後で比較してください。
+AMPLS の PE は複数の IP を使用します。PE の DNS 構成画面に表示された実際の FQDN と IP をすべて記録し、各 FQDN の応答を検証してください。`blob.core.windows.net` の転送では、Private DNS zone に登録された対象のレコードを PE の IP に解決します。転送対象に既存の別 Blob アカウントも含まれるため、それらの名前解決と利用状況を変更前後で比較してください。同名の条件付きフォワーダーが既にある場合は、その転送先と複製範囲も変更の影響に含まれます。
 
 Inbound endpoint が配置された hub VNet に zone をリンクします。このサンプルの転送方向はオンプレミスから Azure です。Resolver は Inbound endpoint を使用します。
+①の workload VM は Resolver の Inbound endpoint を直接 DNS サーバーに指定します。疑似オンプレミスの L1 / L2 は Windows DNS を使用し、③で設定する条件付きフォワーダーを経由します。
+
+## 設計上の制約
+
+### AMPLS と DNS 解決範囲
+
+同じ DNS 解決範囲には、原則として単一の AMPLS を使用します。既存 AMPLS がある場合は、その scope に対象の LAW / DCE を追加する構成を検討します。同じ解決範囲への別 AMPLS の追加は、既存監視の名前解決を変える可能性があります。ラボ用 RG を分けるだけでは、共有する DNS の影響を分離できません。
+
+### Arc Private Link の適用範囲
+
+③は、同じ VNet / DNS 解決範囲の Arc サーバーがすべて Private Link を使用する構成です。Private Link を使用しない Arc サーバーも混在する場合は、共有する DNS の応答がそれらの通信にも影響します。[Arc Private Link の制約](https://learn.microsoft.com/azure/azure-arc/servers/private-link-security#restrictions-and-limitations)に従って構成を決めてください。
+
+### 収集リソースのリージョン
+
+AMPLS の location はグローバルです。DCE の設定取得先は監視対象と同じリージョン、DCR の送信先 LAW も同じリージョンにそろえます。このハンズオンでは Arc PLS と登録する Arc サーバーも同じリージョンに配置します。
+
+### 既存の監視と自動管理
+
+既存 AMA / Arc、DCR / DCE の関連付け、マネージド ID を使用している環境では、その設定と利用先を維持する必要があります。Azure Policy や Defender、Arc 拡張機能の自動配布、SQL Server の自動登録によって、ハンズオン以外の設定や課金対象が追加される場合もあります。
 
 ## 疑似環境について
 
