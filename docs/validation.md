@@ -74,13 +74,13 @@ Event
 | take 100
 ```
 
-`Write-HandsonEvent.ps1` が返した Marker と生成 UTC 時刻を照合します。イベント本文は `AmplsArcHandson marker=<GUID>; utc=<UTC>` です。必要なら `where RenderedDescription contains "<今回の Marker>"` を追加します。今回の DCR で収集する Application イベントは `Event` テーブルを検索してください。
+本文に掲載したイベント生成コマンドが返す Marker と生成 UTC 時刻を照合します。既存の `Write-HandsonEvent.ps1` も同じ本文を生成します。イベント本文は `AmplsArcHandson marker=<GUID>; utc=<UTC>` です。必要なら `where RenderedDescription contains "<今回の Marker>"` を追加します。今回の DCR で収集する Application イベントは `Event` テーブルを検索してください。
 
 | 番号 | 合格条件 |
 |---|---|
 | LOG-1 | Azure VM の制限確認後に生成・取り込みされた新しい Heartbeat がある |
 | LOG-1E（任意） | Azure VM の今回の Marker、対象 ID、生成 UTC 時刻の30分範囲で Event がある。[②のイベント生成と KQL](02-azure.md#optional-event)を使用 |
-| LOG-2 | Arc サーバーの Heartbeat と、③で生成した今回の Marker の Event がある |
+| LOG-2 | Arc サーバーの制限確認後に生成・取り込みされた Heartbeat と、③で生成した今回の Marker の Event がある。[③の本文コマンドと KQL](03-onpremises.md#arc-monitoring)を使用 |
 | LOG-3 | LAW の公開取り込み Disabled、DCE の公開アクセス Disabled、AMPLS の取り込み PrivateOnly、ラボの Restricted NSG を維持したまま LOG-1 / LOG-2 が成功 |
 | LOG-4 | PID と AMA の実行ファイルを照合し、設定取得の DCE とログ送信の LAW の実接続先がそれぞれ対応する PE の IP である |
 

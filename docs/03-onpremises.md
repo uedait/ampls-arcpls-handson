@@ -2,208 +2,377 @@
 
 [README](../README.md) → [② Azure VM](02-azure.md) → ③ → [結果の確認](validation.md)
 
-## この章の完了条件
+## この章で行うこと
 
-- Arc の HIS / Guest Configuration への通信は Arc PE に直接接続する。
-- Arc の必要な公開通信は AzFW Explicit Proxy を使用する。
-- AMA は Proxy なしで②の AMPLS に直接接続し、同じ LAW に新規イベントを送る。
-- 対象サーバーからの直接の公開通信を遮断しても、上記の収集が成立する。
+Arc の管理通信を Arc Private Endpoint（PE）、公開宛先への通信を Azure Firewall の Explicit Proxy に分けます。Azure Monitor Agent（AMA）は②の AMPLS PE へ直接接続し、同じ Log Analytics Workspace（LAW）へ Heartbeat と検証イベントを送ります。最後に、対象サーバーから公開宛先への直接通信を遮断した状態で結果を確認します。
 
-実オンプレミスの Windows Server と既存 Windows DNS を使う場合は、②を終えて本章へ進んでください。任意ラボでは L2 ゲストを登録対象にします。L1 ホストは Azure VM として管理し、IMDS と Azure VM Agent は現在の設定を維持してください。
+本ハンズオンは、同じ VNet / DNS 解決範囲の Arc サーバーがすべて Private Link を使う構成です。Private Link を使わない Arc サーバーも混在させる場合は、共有する DNS の解決結果が通信に影響するため、[公式資料の制約と設計](https://learn.microsoft.com/azure/azure-arc/servers/private-link-security#restrictions-and-limitations)を確認してから構成を決めてください。
 
-①の講師用ラボでは、Windows DNS VM と L1 の操作に hub の Bastion を使用します。L2 のコンソールとスクリプト配置には、Bastion で接続した L1 上の VMConnect / PowerShell Direct を使ってください。具体的な接続・転送手順は[①の管理接続](01-lab.md)を参照します。
+①の環境を使う場合、登録対象は L2 ゲストです。Bastion で L1 に接続し、VMConnect で L2 を操作します。L1 自体は Arc に登録しません。[①の管理接続](01-lab.md)を参照してください。
+
+### 入力に使う値
+
+①の既定 prefix `arclab` を使う場合の入力例です。②の収集リソースも次の名前で作成したものとして示します。②の画像は別の実環境で撮影しているため、画面の名前ではなく、自分が作成したリソース名を使ってください。
+
+| 項目 | ①②の環境の例 | 取得場所 |
+|---|---|---|
+| サブスクリプション / RG | 承認したサブスクリプション / `rg-arclab-lab` | ②で使った作成先 |
+| リージョン | Japan East / コマンドでは `japaneast` | ②で使ったリージョン |
+| hub VNet / PE subnet | `arclab-hub` / `snet-pe` | [②の PE 作成](02-azure.md#2-4-ampls-の-private-endpoint-と-dns-を構成する)と同じ |
+| Resolver Inbound IP | `10.20.2.4` | Portal で「DNS Private Resolver」を検索 → 対象 Resolver →「受信エンドポイント」→ 対象エンドポイントの IP |
+| Windows DNS IP | `10.30.1.5` | 既存 Windows DNS サーバーの IP。①では DNS VM の「概要 → プライベート IP アドレス」 |
+| Firewall のプライベート IP | `10.20.0.4` | Portal で「ファイアウォール」を検索 → 対象 Firewall →「概要」 |
+| DCE の構成アクセス FQDN | 作成した DCE の値 | [②の DCE 概要](02-azure.md#dce-fqdn) |
+| LAW の ODS FQDN と PE IP | 作成した PE の値 | [②の PE の DNS 構成](02-azure.md#law-ods-fqdn) |
+| LAW / DCE / DCR | `law-arclab` / `dce-arclab` / `dcr-arclab-windows` | ②で作成したリソース |
 
 ## 3-1. Arc Private Link Scope と専用 PE を作成する
 
 操作場所は Azure Portal です。
 
-1. 「Azure Arc Private Link Scopes」を検索し、「作成」を選びます。
-2. 承認したサブスクリプション、作業用 RG、名前 `arcpls-handson`、②と同じリージョンを指定します。
-3. 「パブリック ネットワーク アクセスを許可」をオフにします。
-4. 「Private Endpoint」で新規 PE `pe-arc-handson` を作ります。hub VNet と PE subnet、Private DNS 統合を選びます。
-5. 別画面から PE を作成する場合、対象は `Microsoft.HybridCompute/privateLinkScopes`、作成した Arc PLS、サブリソースは `hybridcompute` を選んでください。
-6. 次の zone と DNS zone group を確認します。
+1. 上部の検索で「Azure Arc Private Link Scopes」を開き、「作成」を選びます。
+2. サブスクリプション、RG、名前 `arcpls-handson`、リージョン Japan East を指定します。「パブリック ネットワーク アクセスを許可」はオフにします。
+3. 「Private Endpoint」タブで、プライベート エンドポイントの追加を選び、次を指定します。
 
-   ```text
-   privatelink.his.arc.azure.com
-   privatelink.guestconfiguration.azure.com
-   ```
-
-7. zone の hub VNet へのリンクを確認します。PE 接続が Approved であることと、PE の「DNS の構成」にある FQDN / Private IP の一覧を記録します。
-
-**期待結果**: AMPLS PE と Arc PE が別々に存在します。Arc PLS の publicNetworkAccess が Disabled です。Arc リソースと Arc PLS は同じリージョンで作成します。
-
-同じ VNet / DNS 解決範囲で Private Link を使用する Arc と、Private Link を使用しない Arc を混在させる場合、既存サーバーの名前解決に影響します。承認した対象外の Arc がある場合は、ここで作業を止めて設計を確認してください。
-
-## 3-2. 既存 Windows DNS に条件付きフォワーダーを追加する
-
-操作場所は既存 Windows DNS サーバーの「DNS マネージャー」です。AD 統合 DNS の場合、複製先の全 DNS 利用者に影響することがあります。
-
-1. 事前確認で記録した既存条件付きフォワーダー、zone、既定フォワーダーの値を再確認します。
-2. 「条件付きフォワーダー → 新しい条件付きフォワーダー」を選びます。
-3. 次の7件を1件ずつ設定します。転送先 IP はすべて hub Resolver Inbound IP です。
-
-   | DNS ドメイン | マスター サーバー |
+   | 項目 | 入力例 |
    |---|---|
-   | `his.arc.azure.com` | `<Resolver Inbound IP>` |
-   | `guestconfiguration.azure.com` | `<Resolver Inbound IP>` |
-   | `monitor.azure.com` | `<Resolver Inbound IP>` |
-   | `oms.opinsights.azure.com` | `<Resolver Inbound IP>` |
-   | `ods.opinsights.azure.com` | `<Resolver Inbound IP>` |
-   | `agentsvc.azure-automation.net` | `<Resolver Inbound IP>` |
-   | `blob.core.windows.net` | `<Resolver Inbound IP>` |
+   | PE のサブスクリプション / RG | ②と同じ作成先 / `rg-arclab-lab` |
+   | 名前 | `pe-arc-handson` |
+   | リージョン | hub VNet と同じ Japan East |
+   | 仮想ネットワーク | ②の AMPLS PE と同じ `arclab-hub` |
+   | サブネット | ②と同じ `snet-pe` |
+   | プライベート DNS ゾーンと統合する | はい |
+   | DNS ゾーンのサブスクリプション / RG | ②と同じ作成先 / `rg-arclab-lab` |
+   | 新規作成する DNS ゾーン | `privatelink.his.arc.azure.com`、`privatelink.guestconfiguration.azure.com` |
 
-4. AD への保存・複製範囲は、承認された既存 DNS の運用方針に合わせてください。「フォレスト全体」への不用意な複製は対象外サーバーの名前解決も変えるリスクがあるため、承認した範囲を超えて設定しないでください。
-5. 同名の既存 zone / 条件付きフォワーダーがある場合は、既存値と希望値を照合して担当者の承認を取得してください。承認がなければ停止します。
-6. L2 / 実オンプレミスの対象サーバーの DNS は、**既存 Windows DNS**を指定してください。この経路で条件付きフォワーダーの動作を確認します。
-7. 対象サーバーで、実際の Arc PE / AMPLS PE の各 FQDN と、既存業務の監視名・Blob 名を解決します。
+   既存の承認済み DNS ゾーンがある場合は、それを選択します。AMPLS のゾーンはここでは選びません。
+4. PE の入力画面の「OK / 追加」を押して Arc PLS の作成画面へ戻ります。「確認および作成 → 作成」を押し、デプロイの完了を待ちます。PE の入力だけでは、リソース作成は完了していません。
+5. Portal の検索で「リソース グループ」を開き、`rg-arclab-lab` → `arcpls-handson` を開きます。「プライベート エンドポイント接続」で `pe-arc-handson` の接続状態が `Approved` であることを確認します。承認待ちの場合は Arc PLS の所有者へ承認を依頼します。
+6. 同じ RG から `pe-arc-handson` →「DNS の構成」を開きます。HIS と Guest Configuration の公開 FQDN と、それぞれのプライベート IP を控えます。後のコマンドには `privatelink` 付きの名前ではなく、この画面にある公開 FQDN を使います。
+7. Portal の検索で「プライベート DNS ゾーン」を開き、上記2ゾーンをそれぞれ開きます。「仮想ネットワーク リンク」に `arclab-hub` があり、リンク状態が `Completed` であることを確認します。なければ「追加」で hub VNet を選び、「自動登録を有効にする」をオフにして作成します。PE のレコードは DNS 統合で管理するため、VM の名前を自動登録する必要はありません。
+
+確認: Arc PLS の公開アクセスが無効で、Arc PE が承認済みです。Arc PLS と後で登録する Arc サーバーは同じリージョンを使います。Arc PE と②の AMPLS PE は別のリソースです。
+
+<a id="windows-dns"></a>
+
+## 3-2. Windows DNS に条件付きフォワーダーを追加する
+
+操作場所は既存 Windows DNS サーバーの「DNS マネージャー」です。AD 統合 DNS の設定は複製先にも適用されます。既存基盤では同名のゾーン・フォワーダーを上書きせず、保存・複製範囲を管理者の運用方針に合わせます。新規の専用ラボでは次の7件を追加します。
+
+1. 「DNS マネージャー」で対象 DNS サーバー →「条件付きフォワーダー」を右クリックし、「新しい条件付きフォワーダー」を選びます。
+2. 次の各行について「DNS ドメイン」と「マスター サーバーの IP アドレス」を入力し、「OK」を押します。7件とも同じ Resolver Inbound IP を指定します。
+
+   | DNS ドメイン | マスター サーバーの IP アドレス |
+   |---|---|
+   | `his.arc.azure.com` | `10.20.2.4` |
+   | `guestconfiguration.azure.com` | `10.20.2.4` |
+   | `monitor.azure.com` | `10.20.2.4` |
+   | `oms.opinsights.azure.com` | `10.20.2.4` |
+   | `ods.opinsights.azure.com` | `10.20.2.4` |
+   | `agentsvc.azure-automation.net` | `10.20.2.4` |
+   | `blob.core.windows.net` | `10.20.2.4` |
+
+3. Arc を導入するサーバーで Windows PowerShell を開き、次を実行します。`Get-DnsClientServerAddress` の結果は、この Windows DNS サーバーの IP になっている必要があります。①の L2 は構築済みの設定を使います。別環境では対象サーバーのネットワーク アダプターの IPv4 DNS 設定に Windows DNS の IP を指定します。
 
    ```powershell
+   $dnsServer = '10.30.1.5'
+   $arcHis = '<3-1 の Arc PE にある HIS の公開 FQDN>'
+   $arcGuestConfig = '<3-1 の Arc PE にある Guest Configuration の公開 FQDN>'
+   $dce = '<②の DCE 構成アクセス FQDN>'
+   $ods = '<②の LAW ODS FQDN>'
    Get-DnsClientServerAddress -AddressFamily IPv4
-   Resolve-DnsName '<Arc PE の実際の FQDN>' -Server '<Windows DNS IP>'
-   Resolve-DnsName '<DCE 構成アクセス FQDN>' -Server '<Windows DNS IP>'
-   Resolve-DnsName '<Workspace ID>.ods.opinsights.azure.com' -Server '<Windows DNS IP>'
+   foreach ($fqdn in @($arcHis, $arcGuestConfig, $dce, $ods)) {
+       Resolve-DnsName $fqdn -Server $dnsServer -ErrorAction Stop
+       Test-NetConnection $fqdn -Port 443
+   }
    ```
 
-**期待結果**: 対象サービスの最終 A レコードが PE の IP です。既存業務の名前解決結果と疎通も変更前どおりです。DNS の GUI が Inbound endpoint を権威 DNS として検証できない場合もあるため、GUI の検証表示だけでなく実クエリを確認します。
+確認: 最終 A レコードが対応する PE の IP で、`TcpTestSucceeded` が `True` です。DNS マネージャーで Resolver の検証に警告が出る場合も、実際の名前解決結果で確認します。既存基盤では、利用中の監視サービスと Blob の名前解決・利用が変更前どおりであることも確認してください。
 
-DNS の確認後、3-3 以降で Proxy と Agent を設定してください。名前解決に問題が発生したら[切り戻し](cleanup.md)を行い、既存業務を優先します。
+<a id="explicit-proxy"></a>
 
-## 3-3. AzFW Explicit Proxy を設定する
+## 3-3. Azure Firewall の Explicit Proxy を設定する
 
-操作場所は Azure Portal の **Firewall Policy** です。Firewall 本体の IP を Proxy URL に使いますが、有効化は Policy で行います。
+操作場所は Azure Portal です。①の環境は Firewall Standard を使います。
 
-1. 対象 Firewall が Standard または Premium で、想定した Policy に関連付いていることを確認します。
-2. Policy の「Explicit Proxy」で有効化し、HTTP 待受ポートを例として `3128` にします。Proxy URL は Agent に直接指定するため、PAC の設定は無効のままにしてください。
-3. Application rule collection に Allow のコレクションを用意します。送信元は対象サーバーの IP に限定します。任意ラボでは WinNAT 後の L1 ホスト `10.30.1.4` です。実環境に途中 NAT があれば実際の送信元を確認します。
-4. プロトコル / 宛先ポートは HTTPS / `443` とし、次の公開宛先を現行の[公式ネットワーク要件](https://learn.microsoft.com/azure/azure-arc/servers/network-requirements)と照合して許可します。
+1. 上部の検索で「ファイアウォール」を開き、対象 Firewall →「概要」でプライベート IP を確認します。関連付けられた Firewall Policy のリンクを開きます。
+2. Policy の「Explicit Proxy / 明示的なプロキシ」を開き、有効にします。HTTP 待受ポートには使用可能な任意のポート番号を指定します。本ハンズオンは例として `3128` を使い、以降の接続許可と Proxy URL もこの番号で統一します。HTTP と HTTPS は同じ待受ポートを使います。
 
-   | 分類 | 対象 FQDN の例 | 用途 |
-   |---|---|---|
-   | 認証 | `login.microsoftonline.com`、`*.login.microsoft.com`、`pas.windows.net` | Entra ID。リージョンの認証先も必要 |
-   | リソース管理 | `management.azure.com` | Arc の登録 / 解除 |
-   | 通知 | `guestnotificationservice.azure.com`、`*.guestnotificationservice.azure.com`、公式 allowlist で取得した Service Bus の実 FQDN | 拡張機能・接続通知 |
-   | 初回取得 / 更新 | `aka.ms`、`download.microsoft.com` と実際のリダイレクト先 | Windows インストーラー取得 |
+   Azure Arc の Agent に直接 Proxy URL を指定するため、Proxy PAC は利用しません。「プロキシの自動構成を有効にする」はチェックせず、「保存」を押します。
+3. Policy の「規則コレクション」から「規則コレクションの追加」を開き、次を入力して「追加」を押します。①の専用ハンズオン環境向けの例です。共有環境では既存の優先度と許可先に合わせ、ソースは対象サーバーの送信元 IP（NAT がある場合は変換後の IP）に限定してください。
 
-   この表を使い、使用する Agent / 拡張機能の現行要件と許可先を照合してください。通知先は、インターネットに接続できる管理端末の PowerShell で公式 API を参照し、対象リージョンの応答から実際の FQDN を記録します。
+   | 規則コレクションの項目 | 入力例 |
+   |---|---|
+   | 名前 | `arc-public-outbound` |
+   | 規則コレクションの種類 | Application |
+   | 規則コレクション グループ | `DefaultApplicationRuleCollectionGroup` |
+   | 優先度 | `200`。既存コレクションと重複しない値 |
+   | アクション | Allow / 許可 |
+
+   コレクション内に次の規則を追加します。すべてソースの種類は「IP アドレス」、ソースは `*`、プロトコルは `HTTPS:443`、宛先の種類は「FQDN」です。
+
+   | 規則名 | 対象 FQDN |
+   |---|---|
+   | `arc-auth` | `login.microsoftonline.com`、`*.login.microsoft.com`、`pas.windows.net` |
+   | `arc-arm` | `management.azure.com` |
+   | `arc-notifications` | `guestnotificationservice.azure.com`、`*.guestnotificationservice.azure.com`、`*.servicebus.windows.net` |
+   | `arc-download` | `aka.ms`、`download.microsoft.com`、`gbl.his.arc.azure.com` |
+
+   これは [Arc の公式ネットワーク要件](https://learn.microsoft.com/azure/azure-arc/servers/network-requirements#urls)に基づく例です。ダウンロードの転送先や導入する拡張機能に追加の宛先が必要な場合は、失敗した接続先を確認して追加します。Arc の HIS / Guest Configuration と AMA の送信先は PE に直接接続するため、この Proxy 規則には追加しません。
+4. Policy の「DNS」を開き、「DNS サーバー」でカスタムを選び、Resolver Inbound IP（例 `10.20.2.4`）を入力して「保存」を押します。DNS Proxy は、このハンズオンでは①の設定を維持します。対象サーバーの DNS は [3-2 の Windows DNS](#windows-dns)を使います。
+5. Premium を使う場合は、追加した Application 規則を開き、「TLS 検査」をチェックせず保存します。Arc 用の通信は証明書を置き換えません。①の Standard には TLS 検査の設定がないため、この操作は不要です。共有 Policy の TLS 検査全体は変更しません。
+6. Firewall 本体の「診断設定 → 診断設定を追加」を開き、Application rule のログを選択します。「Log Analytics ワークスペースに送信する」で②の LAW を指定し、宛先テーブルに「リソース固有」を選んで保存します。ログは `AZFWApplicationRule` に入ります。既に同じ設定があれば追加不要です。診断ログの取り込み費用が発生します。
+7. Arc を導入するサーバーの Windows PowerShell で次を実行します。
 
    ```powershell
-   $region = 'japaneast'
-   Invoke-RestMethod -Uri "https://guestnotificationservice.azure.com/urls/allowlist?api-version=2020-01-01&location=$region" |
-     ConvertTo-Json -Depth 10
+   $proxyIp = '10.20.0.4'
+   $proxyPort = 3128
+   $proxyUrl = "http://${proxyIp}:$proxyPort"
+   Test-NetConnection $proxyIp -Port $proxyPort
+   $response = Invoke-WebRequest -UseBasicParsing `
+       -Uri 'https://management.azure.com/metadata/endpoints?api-version=2020-06-01' `
+       -Proxy $proxyUrl -ErrorAction Stop
+   $response.StatusCode
    ```
 
-   応答を取得できなければ停止します。AzFW の対象 FQDN には、応答から取得した実際のホスト名を入力してください。許可先が変更された場合は変更管理の対象にします。
+確認: `TcpTestSucceeded` が `True`、HTTP ステータスが `200` です。これは Proxy 経由の HTTPS 疎通確認であり、Arc の認証確認は次の登録操作で行います。
 
-5. Arc の `*.his.arc.azure.com` / `*.guestconfiguration.azure.com` は Arc PLS PE へ、AMA の Monitor 宛先は AMPLS PE へ直接接続する構成を維持してください。
-6. Firewall の DNS は hub Resolver へそろえ、FQDN の解決結果を確認します。TLS 検査による証明書の置き換えは Agent の接続を失敗させるリスクがあるため、これらの通信には適用しないでください。DNS Proxy と Explicit HTTP Proxy の設定は個別に確認します。
-7. 検証用に Firewall の診断設定を有効にし、Application rule のログを②の LAW または承認済みの別の記録先へ送ります。resource-specific の場合は `AZFWApplicationRule` を使用します。診断設定による取り込みにも費用が発生します。
-8. 対象サーバーから `<FW IP>:3128` への TCP 接続と、Proxy を指定した公開 URL の HTTP 応答を確認します。
+<a id="arc-onboarding"></a>
 
-**期待結果**: Application rule で対象送信元からの許可要求を観測できます。HTTP 400 / 401 等は、その URL の要求形式によることがあります。HTTP 応答があることと、Agent の認証成功は区別します。
+## 3-4. Azure Portal から Arc に登録する
 
-## 3-4. 公開宛先への直接通信を制限する
+オンプレミスにある Azure Arc 導入対象のサーバーで、管理者 Windows PowerShell 5.1（64ビット）を起動して操作します。①では L2 ゲストを使います。リポジトリ独自の導入・登録スクリプトは使いません。
 
-最初に復旧用のプライベート管理接続と担当者を確認します。この試験は専用の対象サーバーだけで行います。共有 Firewall / Proxy の停止は業務通信を停止させるリスクがあるため、実施しないでください。
+1. 管理端末の Azure Portal で「Azure Arc」を検索し、「インフラストラクチャ → マシン → オンボード / 作成 → 既存マシンのオンボード」を開きます。
+2. 「基本」で次を指定します。
 
-- 許可: 対象サーバー → Windows DNS、Arc PE / AMPLS PE の全対象 IP、AzFW の Proxy 待受ポート。
-- 遮断: 対象サーバーから公開宛先への直接通信。既存の既定経路は維持してください。
-- 任意ラボ: ①の最後に適用した、3台それぞれの **NIC NSG** の `LabInternetOutbound=Deny` を維持します。L2 は WinNAT 後に L1 の NIC NSG で評価されます。DNS・PE・Proxy の明示的 Allow、Bastion と Azure プラットフォーム通信を確認してください。共有 VNet 全体の通信を一括遮断すると管理・名前解決へ影響するリスクがあるため、実施しないでください。
-- 実環境: 既存の境界 Firewall 等で対象送信元に適用します。変更記録と復元値を残します。
+   | 項目 | 入力例 |
+   |---|---|
+   | サブスクリプション / RG | 承認した作成先 / `rg-arclab-lab` |
+   | リージョン | Arc PLS と同じ Japan East |
+   | オペレーティング システム | Windows |
+   | 接続方法 | Private endpoint |
+   | Private Link Scope | `arcpls-handson` |
+   | Proxy サーバー URL | `http://10.20.0.4:3128` |
+   | 認証 | マシンを手動で認証 |
 
-ルールの反映後、対象サーバーで `Test-NetConnection management.azure.com -Port 443` の直接 TCP が失敗し、Proxy 待受ポートは成功することを確認します。既存の NAT Gateway や別 Proxy、OS / 環境変数の Proxy による迂回がないかも確認してください。
+3. 「次へ」で「タグ」を開き、`ArcSQLServerExtensionDeployment` = `Disabled` を追加します。本ハンズオンでは SQL Server 拡張機能を自動導入しません。
+4. 「次へ → スクリプトのダウンロードと実行」で作成先と接続方法を確認し、「ダウンロード」を押します。Microsoft が生成する `OnboardingScript.ps1` を対象サーバーの任意の作業フォルダー（例 `C:\ArcOnboarding`）へ配置します。①でも L1 ではなく L2 へ配置してください。
+5. ダウンロードしたファイルをエディターで開きます。生成ファイルの Proxy 設定を次のようにそろえます。
 
-NSG は、VM が実際に送るパケットの宛先を判定します。Proxy 指定時の宛先は AzFW のプライベート IP `10.20.0.4:3128` なので、VM の Internet Deny と併用できます。AzFW から Entra ID / ARM 等への公開通信は Firewall Policy で許可してください。
+   - `SetEnvironmentVariable` を検索します。`HTTPS_PROXY` を `Machine` に保存する行があれば削除します。本ハンズオンではマシン全体の Proxy と既存のサービス設定を変更しません。
+   - ダウンロード処理より前に次の1行を追加します。この値は実行中の PowerShell とその子プロセスだけに適用します。生成ファイルがインストーラーへ渡す `-Proxy` の値も、Portal に入力した同じ URL とします。
 
-## 3-5. Connected Machine agent をインストールする
+     ```powershell
+     $env:HTTPS_PROXY = 'http://10.20.0.4:3128'
+     ```
 
-操作場所は対象サーバーの管理者 Windows PowerShell です。任意ラボでは L2 内です。
-
-1. ①の自動構築では L2 の `C:\Handson` に配置・検証済みの `Install-ArcAgent.ps1` と `Connect-ArcServer.ps1` を使用します。実際のオンプレミスを対象にする場合は、同じコミットの `scripts` 配下から承認された経路で配置してください。
-2. 既存 Arc が未導入の専用対象で、次を実行します。
+   - `--resource-group` と `--tenant-id` を指定する Agent の `connect` 呼び出しを探します。インストール処理が完了した後、この呼び出しの直前に次を追加します。複数行のコマンドの途中には入れません。既に同じ設定がある場合は追加不要です。
 
    ```powershell
-   .\Install-ArcAgent.ps1 -ProxyUri 'http://<FW IP>:3128'
+   $arc = "$env:ProgramFiles\AzureConnectedMachineAgent\azcmagent.exe"
+   & $arc config set proxy.url 'http://10.20.0.4:3128'
+   if ($LASTEXITCODE -ne 0) { throw 'Arc Proxy の設定に失敗しました。' }
+   & $arc config set proxy.bypass 'Arc'
+   if ($LASTEXITCODE -ne 0) { throw 'Arc Proxy bypass の設定に失敗しました。' }
    ```
 
-このスクリプトは、ダウンロード自体に Proxy を指定し、Microsoft 署名を検証して MSI を導入します。OS 全体の Proxy は現在の値を維持します。既存 Agent がある場合は停止するため、既存登録の担当者と利用方法を確認してください。ネットワークからの取得を制限している環境では、公式 MSI を承認済み経路で配置し、`-InstallerPath` で指定します。
-
-```powershell
-.\Install-ArcAgent.ps1 -InstallerPath 'C:\Staging\AzureConnectedMachineAgent.msi'
-```
-
-**期待結果**: `%ProgramFiles%\AzureConnectedMachineAgent\azcmagent.exe` が存在します。再起動要求が出た場合は承認した時間に再起動してから続けてください。Arc への登録は次の 3-6 で確認します。
-
-## 3-6. Proxy / bypass を設定して Arc に登録する
-
-1. Portal の「Azure Arc → インフラストラクチャ → マシン → 既存マシンのオンボード」を開きます。
-2. 対象の Subscription / RG / Region / Windows を指定し、Private endpoint と作成済み Arc PLS を選択します。Proxy URL は AzFW の URL、認証は手動認証を選びます。
-3. 生成内容を確認し、特に Tenant ID、Subscription ID、Arc PLS の完全なリソース ID、地域を作業記録と照合します。Portal の生成内容は入力値の確認に使い、登録には次の保存済みスクリプトを使用してください。3-5 で導入した Agent を使用します。
-4. 対象サーバーで実行します。
+   `Arc` の指定で HIS / Guest Configuration は PE に直接接続し、認証・ARM 等は Proxy を使います。この指定は [公式の Agent 固有 Proxy 設定](https://learn.microsoft.com/azure/azure-arc/servers/manage-agent-proxy-settings#proxy-bypass-for-private-endpoints)です。独自の登録スクリプトを作らず、公式の生成ファイルに本ハンズオンで必要な設定だけを追加します。
+6. 対象サーバーの管理者 Windows PowerShell で、ファイルの配置先へ移動して実行します。
 
    ```powershell
-   .\Connect-ArcServer.ps1 `
-     -TenantId '<Tenant ID>' `
-     -SubscriptionId '<Subscription ID>' `
-     -ResourceGroup '<Arc を作る RG>' `
-     -Location 'japaneast' `
-     -MachineName 'onprem-win01' `
-     -PrivateLinkScopeId '<Arc PLS の完全なリソース ID>' `
-     -ProxyUri 'http://<FW IP>:3128'
+   Set-Location 'C:\ArcOnboarding'
+   .\OnboardingScript.ps1
    ```
 
-5. 表示されたデバイスコードの認証先 URL を、承認された管理端末のブラウザーで開きます。コードやトークンを画面キャプチャ、Git、共有資料に含めると、第三者に認証を利用されるリスクがあるため、記録しないでください。組織の条件付きアクセスがデバイスコードを許可しない場合は、管理者と[公式の代替認証方式](https://learn.microsoft.com/azure/azure-arc/servers/azcmagent-connect)を選び直してください。
-
-スクリプトは登録前に、次を Agent 固有に設定します。
-
-```text
-proxy.url = http://<FW IP>:3128
-proxy.bypass = Arc
-```
-
-bypass は `Arc` を指定してください。これにより Arc PLS 宛てを直接接続、Entra ID や ARM 等の公開宛先を Proxy 経由に分けます。今回の登録対象を Arc と AMA に限定するため、SQL Server 拡張機能の自動導入を無効にするタグ `ArcSQLServerExtensionDeployment=Disabled` も設定します。
-
-6. 登録後に確認します。
+   公式スクリプトが Agent のダウンロード、インストール、Arc 登録を行います。画面に表示された認証 URL を管理端末で開き、表示されたコードで認証します。コード・トークン・認証画面は記録や画像に含めません。デバイスコード認証が禁止されている場合は、[公式の別認証方法](https://learn.microsoft.com/azure/azure-arc/servers/azcmagent-connect)を選びます。登録と手順8の確認が終わったら、この PowerShell を閉じてセッション限定の Proxy を終了します。
+7. Portal の「Azure Arc → インフラストラクチャ → マシン」を開き、登録したサーバーの状態が `Connected` であることを確認します。対象を開いて作成先とリージョンを確認し、「概要 → JSON ビュー」の `id` を控えます。KQL に使うのはこの Arc リソース ID です。①の L1 の VM ID とは異なります。
+8. 対象サーバーの管理者 Windows PowerShell で次を実行します。
 
    ```powershell
    $arc = "$env:ProgramFiles\AzureConnectedMachineAgent\azcmagent.exe"
    & $arc show
+   if ($LASTEXITCODE -ne 0) { throw 'Arc の状態取得に失敗しました。' }
    & $arc check --location japaneast --enable-pls-check
+   if ($LASTEXITCODE -ne 0) { throw 'Arc のネットワークチェックに失敗しました。' }
    ```
 
-7. Portal の Arc machine で状態 Connected、正しい RG / Region、Arc PLS への関連付けを確認します。PLS の一覧側からも対象 machine の関連付けを確認します。
+確認: 有効な Proxy URL が指定どおりで、bypass が `Arc` です。ネットワークチェックでは HIS / Guest Configuration が Private Endpoint を使い、認証・ARM 等の必須チェックも成功します。
 
-**期待結果**: Arc の Private Endpoint と Proxy を使う宛先を `azcmagent check` の結果で区別でき、必須チェックが成功します。Portal の接続状態と、チェック結果の実際の通信経路を併せて確認してください。
+<a id="arc-monitoring"></a>
 
-## 3-7. Arc サーバーに DCR / DCE と AMA を関連付ける
+## 3-5. AMA と DCR / DCE を関連付けてログを確認する
 
-1. ②で作成した DCR を Portal で開き、「リソース → 追加」で今回の Arc machine を選びます。
-2. DCR への関連付けにより、Portal が `AzureMonitorWindowsAgent` 拡張機能を導入します。Arc machine の「拡張機能」で Provisioning succeeded を確認してください。
-3. DCE の「リソース」で Arc machine を追加し、設定取得先を関連付けます。選択画面に対象が出ない場合は、リージョンと権限を確認し、[公式 DCE 関連付け手順](https://learn.microsoft.com/azure/azure-monitor/fundamentals/private-link-vm-kubernetes)に従います。
-   Portal に選択肢がない場合は、②と同じ `scripts\Set-DceAssociation.ps1` を使用してください。`-ResourceId` に **Arc machine の完全な ID**、`-DceId` に **DCE の完全な ID**を指定します。
-4. 管理端末 / Cloud Shell の PowerShell 7 で、対象テナントとサブスクリプションへの CLI 接続を照合して実行します。
+1. Portal で「監視」を検索し、「設定 → データ収集ルール」から②の `dcr-arclab-windows` を開きます。「リソース → 追加」で登録した Arc サーバーを選び、「適用」を押します。Portal が AMA を導入します。
+2. Arc サーバーの「拡張機能」で `AzureMonitorWindowsAgent` のプロビジョニング状態が `Succeeded` になるまで待ちます。
+3. 「監視 → 設定 → データ収集エンドポイント」から②の `dce-arclab` を開き、「リソース → 追加」で同じ Arc サーバーを選びます。DCR にも DCE にも対象があることを確認します。DCE は AMA の設定取得先です。
+4. AMA の拡張機能の「JSON ビュー」で settings の proxy を確認します。`mode=none` に設定済みなら次へ進みます。別の Proxy 設定がある場合や直接接続を確認できない場合は、後述の[管理端末の補助操作](#management-commands)で `none` にします。
+5. 閉域収集を判定する前に、②の LAW の公開取り込みが無効、DCE の公開アクセスが無効、AMPLS の取り込みモードが `Private Only` であることを確認します。①のラボは既存の Restricted NSG を維持します。実オンプレミスでは管理者が対象サーバーの公開直接通信を制限し、Windows DNS、PE、Proxy と管理接続を許可した状態で試験します。
+
+   対象サーバーで次を実行します。直接接続は `False`、Proxy 待受ポートへの接続は `True` が期待結果です。
 
    ```powershell
-   .\scripts\Set-AmaDirect.ps1 `
-     -ExpectedTenantId '<Tenant ID>' `
-     -ExpectedSubscriptionId '<Subscription ID>' `
-     -ResourceType ArcServer `
-     -ResourceGroup '<Arc の RG>' `
-     -MachineName 'onprem-win01'
+   Test-NetConnection management.azure.com -Port 443
+   Test-NetConnection '10.20.0.4' -Port 3128
+   [datetime]::UtcNow.ToString('o')
    ```
 
-5. Arc 拡張機能の settings に `proxy.mode=none` が設定され、DCR と DCE の両方に今回の対象が関連付いていることを確認します。
-6. L2 / 対象サーバーに `scripts\Write-HandsonEvent.ps1` をコピーし、管理者 Windows PowerShell から1回実行します。
-7. [結果の確認](validation.md)で今回の Marker と Arc リソース ID を照合し、②の Azure VM と③の Arc machine の結果を個別に記録してください。
+   出力した UTC 時刻を基準時刻として控えます。既に制限済みの環境も公開アクセスを戻しません。
+6. 対象サーバーの管理者 Windows PowerShell 5.1 で、次を1回実行します。Application に検証イベントを1件書き込みます。
 
-AMA の導入ファイル配布は Arc の拡張機能管理を使います。初回配布または更新で失敗する場合は、配布に必要な実際の FQDN と経路を調査してください。AMA の稼働通信は `proxy.mode=none` を維持し、AMPLS PE への接続先と新規ログの到着で判定します。
+   ```powershell
+   $ErrorActionPreference = 'Stop'
+   if ($PSVersionTable.PSEdition -ne 'Desktop' -or
+       $PSVersionTable.PSVersion.Major -ne 5 -or
+       $PSVersionTable.PSVersion -lt [version]'5.1') {
+       throw '管理者 Windows PowerShell 5.1 で実行してください。'
+   }
+   $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+   $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+   if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+       throw 'Windows PowerShell を管理者として実行してください。'
+   }
+   $source = 'AmplsArcHandson'
+   if ([Diagnostics.EventLog]::SourceExists($source) -and
+       [Diagnostics.EventLog]::LogNameFromSourceName($source, '.') -ne 'Application') {
+       throw '同名のイベントソースが別のログに属しています。'
+   }
+   if (-not [Diagnostics.EventLog]::SourceExists($source)) {
+       New-EventLog -LogName Application -Source $source
+   }
+   $marker = [guid]::NewGuid().ToString()
+   $utc = [datetime]::UtcNow.ToString('o')
+   Write-EventLog -LogName Application -Source $source -EventId 9001 `
+       -EntryType Information -Message "AmplsArcHandson marker=$marker; utc=$utc"
+   [pscustomobject]@{
+       Marker = $marker
+       GeneratedUtc = $utc
+       Computer = $env:COMPUTERNAME
+       EventId = 9001
+       Source = $source
+   }
+   ```
+
+7. Portal の②の LAW →「ログ」を開き、「KQL モード」で次を実行します。表示上限は「表示 → カスタム → 100」にします。Arc の JSON ビューで取得した `id` と、手順5の基準 UTC 時刻を貼り付けます。
+
+   ```kusto
+   let targetResourceId = "<Arc サーバーの JSON ビューの id>";
+   let restrictedSince = todatetime("<手順5で控えた UTC 時刻>");
+   Heartbeat
+   | where TimeGenerated > ago(30m)
+   | where _ResourceId =~ targetResourceId
+   | where Category == "Azure Monitor Agent"
+   | where TimeGenerated > restrictedSince and ingestion_time() > restrictedSince
+   | project TimeGenerated, IngestedAt=ingestion_time(), Computer, _ResourceId
+   | order by TimeGenerated desc
+   | take 100
+   ```
+
+8. 同じ画面で、今回のイベントの Marker と GeneratedUtc を貼り付けて実行します。検索期間は生成時刻の1分前から29分後までの30分、上限100件です。
+
+   ```kusto
+   let targetResourceId = "<Arc サーバーの JSON ビューの id>";
+   let marker = "<今回の Marker>";
+   let generatedUtc = todatetime("<今回の GeneratedUtc>");
+   Event
+   | where TimeGenerated between ((generatedUtc - 1m) .. (generatedUtc + 29m))
+   | where _ResourceId =~ targetResourceId
+   | where Source == "AmplsArcHandson" and EventID == 9001
+   | where RenderedDescription contains marker
+   | project TimeGenerated, IngestedAt=ingestion_time(), Computer, EventID,
+             Source, RenderedDescription, _ResourceId
+   | order by TimeGenerated desc
+   | take 100
+   ```
+
+確認: 制限確認後の Heartbeat と今回の Marker の Event が対象 Arc サーバーから到着します。初回は15分を目安に待ちます。0件の場合は検索期間と結果を記録し、検索エラーの場合はエラーを記録して[障害調査](troubleshooting.md)へ進みます。
+
+閉域経路の合格には、[3-2 の DNS / TCP](#windows-dns)、[Arc のチェック](#arc-onboarding)、[②と同じ AMA の実接続確認](02-azure.md#ama-peers)も必要です。AMA の PID と実行ファイルを照合し、DCE と LAW の両接続先が AMPLS PE の対応する IP であることを確認します。接続を取得できなければ未取得として記録し、ログの到着だけで閉域経路の合格にはしません。①②の Azure VM と③の Arc サーバーの結果は、それぞれのリソース ID で区別します。
+
+### Proxy を通った公開通信の確認
+
+Firewall の診断設定で指定した LAW の「ログ」で次を実行します。①の L2 は WinNAT を通るため、Firewall が観測する送信元は L1 の `10.30.1.4` です。規則のソースを `*` にしていても、検索は対象送信元と実施時刻に絞ります。
+
+```kusto
+let sourceIp = "10.30.1.4";
+let startedUtc = todatetime("<手順5で控えた UTC 時刻>");
+AZFWApplicationRule
+| where TimeGenerated between (startedUtc .. (startedUtc + 30m))
+| where SourceIp == sourceIp
+| project TimeGenerated, SourceIp, Fqdn, Action, Protocol
+| order by TimeGenerated desc
+| take 100
+```
+
+確認: Arc の認証先・管理先への Allow を確認します。詳細な試験番号と記録方法は[結果の確認](validation.md)にまとめています。
+
+<a id="management-commands"></a>
+
+### 必要な場合だけ使う管理端末の補助操作
+
+対象サーバー内では実行しません。管理端末の PowerShell 7 と、[Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli)を使います。事前確認で決めた認証方法で対象テナントへサインインし、`az account show` の tenant / subscription / 実行 ID / 認証種別を承認記録と照合します。証明書を使う場合は[事前確認](prerequisites.md)に従ってください。
+
+Arc サーバーと DCE の「概要 → JSON ビュー」の `id` をコピーします。Portal で設定取得用 DCE を関連付けられない場合は、[公式 CLI コマンド](https://learn.microsoft.com/azure/azure-monitor/fundamentals/private-link-vm-kubernetes#associate-vmcluster-with-dce)を実行します。DCE の「リソース」と既存の関連付けを確認し、別の DCE が関連付いている場合は置き換えず管理者と調整してください。
+
+```powershell
+$subscriptionId = '<承認した Subscription ID>'
+$arcId = '<Arc サーバーの JSON ビューの id>'
+$dceId = '<DCE の JSON ビューの id>'
+az monitor data-collection rule association list `
+    --resource $arcId --subscription $subscriptionId
+if ($LASTEXITCODE -ne 0) { throw '既存の関連付け取得に失敗しました。' }
+```
+
+表示された `dataCollectionEndpointId` が空で、新たに関連付ける場合だけ次を実行します。同じ DCE の関連付けがあれば追加不要です。
+
+```powershell
+az monitor data-collection rule association create `
+    --association-name configurationAccessEndpoint `
+    --data-collection-endpoint-id $dceId --resource-uri $arcId `
+    --subscription $subscriptionId
+if ($LASTEXITCODE -ne 0) { throw 'DCE の関連付けに失敗しました。' }
+```
+
+AMA の直接接続を明示設定する場合は、次を実行します。[公式拡張機能 CLI](https://learn.microsoft.com/cli/azure/connectedmachine/extension#az-connectedmachine-extension-update)で既存 settings を取得し、proxy だけを `none` に変えます。CLI の拡張機能が不足する場合は、公式コマンドページのインストール手順に従って準備してください。
+
+```powershell
+$subscriptionId = '<承認した Subscription ID>'
+$resourceGroup = '<Arc サーバーの RG>'
+$machineName = '<Portal にある Arc サーバー名>'
+$raw = az connectedmachine extension show --name AzureMonitorWindowsAgent `
+    --machine-name $machineName --resource-group $resourceGroup `
+    --subscription $subscriptionId --output json
+if ($LASTEXITCODE -ne 0) { throw 'AMA の設定取得に失敗しました。' }
+$extension = ($raw -join "`n") | ConvertFrom-Json -AsHashtable
+if ($extension.publisher -ne 'Microsoft.Azure.Monitor') {
+    throw '対象の拡張機能は AMA ではありません。'
+}
+$settings = $extension.settings
+if ($null -eq $settings) { $settings = @{} }
+$settings['proxy'] = @{ mode = 'none' }
+$file = New-TemporaryFile
+try {
+    $settings | ConvertTo-Json -Depth 30 |
+        Set-Content -LiteralPath $file.FullName -Encoding utf8NoBOM
+    az connectedmachine extension update --name AzureMonitorWindowsAgent `
+        --machine-name $machineName --resource-group $resourceGroup `
+        --subscription $subscriptionId --settings ('@' + $file.FullName)
+    if ($LASTEXITCODE -ne 0) { throw 'AMA の Proxy 設定に失敗しました。' }
+} finally {
+    Remove-Item -LiteralPath $file.FullName
+}
+```
+
+操作後は Portal の拡張機能で `Succeeded` と `settings.proxy.mode=none` を確認します。AMA の配布失敗と稼働通信は分けて扱い、配布先を許可する場合も対象と期間を限定してください。
 
 ## 根拠
 
 - [Arc PLS と制約](https://learn.microsoft.com/azure/azure-arc/servers/private-link-security)
-- [Windows への導入と Portal 生成スクリプト](https://learn.microsoft.com/azure/azure-arc/servers/onboard-portal)
+- [Portal が生成する公式導入・登録スクリプト](https://learn.microsoft.com/azure/azure-arc/servers/onboard-portal)
 - [Arc の Proxy / bypass](https://learn.microsoft.com/azure/azure-arc/servers/manage-agent-proxy-settings)
 - [Arc ネットワーク要件](https://learn.microsoft.com/azure/azure-arc/servers/network-requirements)
 - [Explicit Proxy](https://learn.microsoft.com/azure/firewall/explicit-proxy)
-- [AMA の導入方法](https://learn.microsoft.com/azure/azure-monitor/agents/azure-monitor-agent-manage)
-- [AMA の Proxy](https://learn.microsoft.com/azure/azure-monitor/agents/azure-monitor-agent-network-configuration)
+- [Firewall の DNS 設定](https://learn.microsoft.com/azure/firewall/dns-settings)
+- [Premium の Application 規則と TLS 検査](https://learn.microsoft.com/azure/firewall/premium-portal#rule-configuration)
+- [DCE の関連付け](https://learn.microsoft.com/azure/azure-monitor/fundamentals/private-link-vm-kubernetes)
+- [AMA のネットワーク設定](https://learn.microsoft.com/azure/azure-monitor/agents/azure-monitor-agent-network-configuration)
