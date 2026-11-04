@@ -4,15 +4,19 @@
 
 ## この章で行うこと
 
-Arc の管理通信を Arc Private Endpoint（PE）、公開宛先への通信を Azure Firewall の Explicit Proxy に分けます。Azure Monitor Agent（AMA）は②の AMPLS PE へ直接接続し、同じ Log Analytics Workspace（LAW）へ Heartbeat と検証イベントを送ります。最後に、対象サーバーから公開宛先への直接通信を遮断した状態で結果を確認します。
+オンプレミスの Windows Server を Azure Arc に登録し、②で作成した Log Analytics ワークスペースでログを確認します。次の順に進めます。
+
+1. Azure Arc 用のプライベート エンドポイントを作成し、サーバーから名前解決・接続できるようにします。
+2. サーバーを Azure Arc に登録します。Arc の管理通信はプライベート エンドポイントを使い、認証などのインターネット接続が必要な通信は Azure Firewall のプロキシを使います。
+3. Azure Monitor Agent を導入し、②の AMPLS のプライベート エンドポイント経由でログを送ります。サーバーの稼働状況を示す Heartbeat と、自分で作成した検証イベントを確認します。
+
+最後に、サーバーがインターネットへ直接接続できない状態でも、Arc の接続とログ収集が続くことを確認します。
 
 本ハンズオンは、同じ VNet / DNS 解決範囲の Arc サーバーがすべて Private Link を使う構成です。Private Link を使わない Arc サーバーも混在させる場合は、共有する DNS の解決結果が通信に影響するため、[公式資料の制約と設計](https://learn.microsoft.com/azure/azure-arc/servers/private-link-security#restrictions-and-limitations)を確認してから構成を決めてください。
 
-①の環境を使う場合、登録対象は L2 ゲストです。Bastion で L1 に接続し、VMConnect で L2 を操作します。L1 自体は Arc に登録しません。[①の管理接続](01-lab.md)を参照してください。
-
 ### 入力に使う値
 
-①の既定 prefix `arclab` を使う場合の入力例です。②の収集リソースも次の名前で作成したものとして示します。②の画像は別の実環境で撮影しているため、画面の名前ではなく、自分が作成したリソース名を使ってください。
+①の既定 prefix `arclab` を使う場合の入力例です。②の収集リソースも次の名前で作成したものとして示します。自分が作成したリソース名を使ってください。
 
 | 項目 | ①②の環境の例 | 取得場所 |
 |---|---|---|
