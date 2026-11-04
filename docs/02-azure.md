@@ -184,8 +184,6 @@ AMA の設定取得には DCE、ログ送信には LAW の関連付けを使用�
 
    ![PE の顧客向け FQDN と Private IP の対応一覧](images/02-azure/2-4-08-pe-fqdn.png)
 
-   ![Private DNS zone と実際の A レコード、IP、zone group の一覧](images/02-azure/2-4-09-pe-zone-records.png)
-
 <a id="law-ods-fqdn"></a>
 
    LAW の DNS 検証には、PE の「DNS の構成」で公開 FQDN `<guid>.ods.opinsights.azure.com` の行をコピーします。`privatelink` を含む別名は使いません。同じ行の Private IP を LAW の比較対象にします。Workspace ID を別途記録して組み立てる必要はありません。DCE の比較対象 IP も、[構成アクセス FQDN](#dce-fqdn)に対応する PE の行で確認します。
@@ -251,8 +249,6 @@ AMA の設定取得には DCE、ログ送信には LAW の関連付けを使用�
 
    ![対象の workload VM だけを選択する画面](images/02-azure/2-6-03-dcr-vm-select.png)
 
-   ![対象 VM のシステム割り当て ID がオンの確認画面](images/02-azure/2-6-12-vm-identity.png)
-
 5. 「データ収集エンドポイント列を表示する」を有効にし、対象 VM の行を選択して「データ収集エンドポイントの編集」から `dce-lab1031` を指定します。従来の画面では「データ収集エンドポイントを有効にする」を使用します。画面にない場合は、作成後に DCE の「リソース → 追加」から対象 VM を関連付けます。
 
    ![VM が設定取得に使う DCE を指定する入力画面](images/02-azure/2-6-04-dcr-vm-dce.png)
@@ -280,8 +276,6 @@ AMA の設定取得には DCE、ログ送信には LAW の関連付けを使用�
 9. 対象 VM の「拡張機能とアプリケーション」で `AzureMonitorWindowsAgent` が Provisioning succeeded になるまで確認します。
 
    ![AMA と既存 Defender 拡張機能の Provisioning succeeded](images/02-azure/2-6-13-ama-extension.png)
-
-   ![AMA の詳細で Success とハンドラー Ready を確認した画面](images/02-azure/2-6-14-ama-ready.png)
 
 10. DCR の「リソース」と DCE の「リソース」で、それぞれ対象 VM が存在することを確認します。DCR に DCE を記入したことと、**VM に設定取得用 DCE が関連付いていること**は別の確認項目です。
 
@@ -465,8 +459,6 @@ Event
 確認: 今回の Marker を含む対象 VM のイベントが到着したら LOG-1E の合格を記録します。未実施でも LOG-1 の基本試験は実施できます。初回は15分を目安に待ち、0件と検索失敗を区別して記録します。
 
 次の画像は 2026年10月31日 07:23〜07:53 UTC の過去の任意イベント試験の参考です。今回の検証結果を示すものではありません。
-
-![過去の任意イベント試験の KQL](images/02-azure/2-7-02-event-query.png)
 
 ![過去の任意イベント試験の結果](images/02-azure/2-7-03-event-result.png)
 
