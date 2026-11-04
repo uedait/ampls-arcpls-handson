@@ -46,6 +46,10 @@ Azure Monitor Private Link と Azure Arc Private Link を使用し、Azure VM �
 - ①の講師用ラボでは hub の Azure Bastion Standard から各 Azure VM を操作します。L2 は L1 の VMConnect / PowerShell Direct 経由で操作してください。Bastion と専用 Public IP の費用も予算に含めます。
 - ①の構築中は3台それぞれの PIP で外向き通信を行い、公式 ISO から L2 を自動構築します。①の最後に各 NIC の NSG を Restricted に切り替え、②③は直接の Internet 通信を遮断した状態で実施します。PIP は関連付けたまま維持し、NSG で通信を制御してください。
 
+## ライセンス
+
+本リポジトリの自作コードと文書は [MIT License](LICENSE) で提供します。Microsoft の画面・アイコンなどの第三者素材には、その提供元の利用条件が適用されます。
+
 ## 免責
 - Hands-on の作成日は `2026-10-27` です。
 - 内容は正確性を期してはいますが、内容を保証するものではありません。
